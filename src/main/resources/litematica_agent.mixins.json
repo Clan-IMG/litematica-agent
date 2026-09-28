@@ -3,7 +3,10 @@
   "minVersion": "0.8",
   "package": "net.clanimg.litematica_agent.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": [
+  "client": [
+    "BlockItemInvoker",
+    "HandledScreenAccessor",
+    "KeyboardInputMixin"
   ],
   "injectors": {
     "defaultRequire": 1

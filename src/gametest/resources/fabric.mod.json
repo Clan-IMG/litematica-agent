@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "litematica_agent_gametest",
+  "version": "1.0.0",
+  "name": "Litematica Agent Game Tests",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "net.clanimg.litematica_agent.gametest.HomeTravelGameTest",
+      "net.clanimg.litematica_agent.gametest.CreativeBuildGameTest",
+      "net.clanimg.litematica_agent.gametest.SurvivalBuildGameTest",
+      "net.clanimg.litematica_agent.gametest.SessionManagementGameTest",
+      "net.clanimg.litematica_agent.gametest.SurvivalAdvancedGameTest"
+    ]
+  },
+  "depends": {
+    "litematica_agent": "*"
+  }
+}

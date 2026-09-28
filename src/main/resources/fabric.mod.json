@@ -3,33 +3,28 @@
   "id": "litematica_agent",
   "version": "${version}",
   "name": "Litematica Agent",
-  "description": "",
-  "authors": [],
-  "contact": {},
+  "description": "Autonomous building agent for Litematica schematics.",
+  "authors": ["Clan-IMG"],
+  "contact": {
+    "sources": "https://github.com/Clan-IMG/litematica-agent",
+    "issues": "https://github.com/Clan-IMG/litematica-agent/issues"
+  },
   "license": "All-Rights-Reserved",
   "icon": "assets/litematica_agent/icon.png",
-  "environment": "*",
+  "environment": "client",
   "entrypoints": {
-    "fabric-datagen": [
-      "net.clanimg.litematica_agent.client.Litematica_agentDataGenerator"
-    ],
     "client": [
-      "net.clanimg.litematica_agent.client.Litematica_agentClient"
-    ],
-    "main": [
-      "net.clanimg.litematica_agent.Litematica_agent"
+      "net.clanimg.litematica_agent.LitematicaAgentClient"
     ]
   },
   "mixins": [
-    "litematica_agent.mixins.json",
-    {
-      "config": "litematica_agent.client.mixins.json",
-      "environment": "client"
-    }
+    "litematica_agent.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
-    "minecraft": "${minecraft_version}"
+    "minecraft": "${minecraft_version}",
+    "litematica": ">=0.26.0",
+    "malilib": "*"
   }
 }
