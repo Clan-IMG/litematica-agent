@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "litematica_agent",
+  "version": "${version}",
+  "name": "Litematica Agent",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/litematica_agent/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-datagen": [
+      "net.clanimg.litematica_agent.client.Litematica_agentDataGenerator"
+    ],
+    "client": [
+      "net.clanimg.litematica_agent.client.Litematica_agentClient"
+    ],
+    "main": [
+      "net.clanimg.litematica_agent.Litematica_agent"
+    ]
+  },
+  "mixins": [
+    "litematica_agent.mixins.json",
+    {
+      "config": "litematica_agent.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
