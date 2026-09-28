@@ -58,6 +58,7 @@
   "litematica_agent.help.home": "/agent home storage|build <befehl> – Server-Home für weit entfernte Lager/Baustellen",
   "litematica_agent.help.config": "/agent config [name wert] – Einstellungen",
   "litematica_agent.help.deposit": "/agent deposit – übrige Materialien zurück ins Lager bringen",
+  "litematica_agent.help.stock": "/agent stock – nur Creative: befüllt Truhen mit den Materialien der Schematic, zum Vorbereiten vor einem Survival-Durchlauf",
 
   "litematica_agent.home.cleared": "Home-Befehle entfernt.",
   "litematica_agent.home.hint": "Beispiel: /agent home storage home lager – der Agent nutzt dann /home lager, wenn das Lager weit weg ist.",
@@ -69,7 +70,7 @@
   "litematica_agent.hud.materials": "Lager-Scan: %s/%s Materialien vollständig",
   "litematica_agent.hud.more": "… und %s weitere",
 
-  "litematica_agent.info.building_started": "Agent #%s baut jetzt „%s“. ESC pausiert und gibt dir die Steuerung zurück.",
+  "litematica_agent.info.building_started": "Agent #%s baut jetzt „%s“. Über den Pause-Button bekommst du die Steuerung zurück.",
   "litematica_agent.info.cancelled": "Session #%s (%s) wurde abgebrochen und gelöscht.",
   "litematica_agent.info.completed": "Bau von „%s“ abgeschlossen! Aktive Bauzeit: %s (insgesamt seit Start: %s). %s Blöcke platziert.",
   "litematica_agent.info.creative_detected": "Creative-Modus erkannt – die Lagerverwaltung wird übersprungen.",
@@ -89,19 +90,24 @@
   "litematica_agent.list.title": "Agent-Sessions:",
 
   "litematica_agent.lock.action": "Aktuelle Aktion:",
+  "litematica_agent.lock.approve": "Genehmigen",
   "litematica_agent.lock.cancel": "Abbrechen",
   "litematica_agent.lock.cancel_message": "Session #%s (%s) endgültig löschen? Bereits gebaute Blöcke bleiben stehen.",
   "litematica_agent.lock.cancel_title": "Session abbrechen?",
   "litematica_agent.lock.depositing": "Bringt übrige Materialien ins Lager",
   "litematica_agent.lock.eta": "Verbleibend: ca. %s Minuten",
   "litematica_agent.lock.eta_estimate": "Verbleibend: ca. %s Minuten (grobe Schätzung)",
-  "litematica_agent.lock.hint_paused": "ESC: Bildschirm schließen und selbst spielen",
-  "litematica_agent.lock.hint_running": "ESC: Agent pausieren und Steuerung übernehmen",
   "litematica_agent.lock.idle": "Kein aktiver Agent",
   "litematica_agent.lock.layer": "Ebene Y=%s (%s von %s)",
   "litematica_agent.lock.leave": "Verlassen",
+  "litematica_agent.lock.mode": "Modus: %s",
+  "litematica_agent.lock.mode_ask": "Genehmigung anfordern",
+  "litematica_agent.lock.mode_ask_tooltip": "Der Agent stoppt bei Blöcken, die nicht zur Schematic gehören, und fragt dich, bevor er sie abbaut.",
+  "litematica_agent.lock.mode_skip": "Genehmigung überspringen",
+  "litematica_agent.lock.mode_skip_tooltip": "Alles erlaubt: Der Agent baut Blöcke, die nicht zur Schematic gehören, ohne Nachfrage ab.",
   "litematica_agent.lock.pause": "Pause",
   "litematica_agent.lock.progress": "Fortschritt: %s%% (%s/%s Blöcke)",
+  "litematica_agent.lock.reject": "Ablehnen",
   "litematica_agent.lock.resume": "Weiter",
   "litematica_agent.lock.status": "Status: %s",
   "litematica_agent.lock.status_building": "BAUT",
@@ -118,7 +124,7 @@
   "litematica_agent.pause.screen_opened": "Ein anderes Menü wurde geöffnet (%s).",
   "litematica_agent.pause.switched": "Es wurde zu einer anderen Session gewechselt.",
   "litematica_agent.pause.unreachable_area": "Der nächste Bauabschnitt bei %s ist nicht erreichbar.",
-  "litematica_agent.pause.wrong_block": "Bei %s steht %s statt %s. Entferne den Block selbst oder erlaube dem Agenten das Abbauen mit /agent config breakWrongBlocks true.",
+  "litematica_agent.pause.wrong_block": "Bei %s steht %s statt %s. Genehmigen: der Agent baut ihn ab. Ablehnen: der Block bleibt und diese Stelle wird übersprungen.",
 
   "litematica_agent.prepare.empty_inventory": "Bitte leere dein Inventar. Werkzeuge, Essen, Rüstung und die Offhand dürfen bleiben – Werkzeuge helfen dem Agenten beim Abbauen von Hilfsblöcken.",
   "litematica_agent.prepare.ready_creative": "Session #%s ist bereit.",
@@ -137,6 +143,7 @@
   "litematica_agent.reason.path": "Weg nicht gefunden",
   "litematica_agent.reason.unknown": "unbekannter Fehler",
   "litematica_agent.reason.unreachable": "nicht erreichbar",
+  "litematica_agent.reason.wrong_block": "anderer Block im Weg (abgelehnt)",
 
   "litematica_agent.scan.agent_working": "Der Agent nutzt diese Truhe – ESC pausiert ihn",
   "litematica_agent.scan.all": "Alle scannen",
@@ -163,6 +170,17 @@
 
   "litematica_agent.status.line": "#%s %s – %s – %s/%s Blöcke",
   "litematica_agent.status.none": "Kein Agent aktiv.",
+
+  "litematica_agent.stock.action_fill": "Befüllt die Truhe bei %s",
+  "litematica_agent.stock.action_place": "Platziert eine Truhe bei %s",
+  "litematica_agent.stock.cancel": "Abbrechen",
+  "litematica_agent.stock.creative_required": "Das funktioniert nur im Creative-Modus.",
+  "litematica_agent.stock.done": "Fertig: %s Doppeltruhen mit insgesamt %s Items befüllt.",
+  "litematica_agent.stock.failed": "Truhen-Stock abgebrochen: %s",
+  "litematica_agent.stock.level_progress": "Truhe %s/%s",
+  "litematica_agent.stock.no_materials": "Die Schematic enthält keine Materialien, die gelagert werden könnten.",
+  "litematica_agent.stock.started": "Baue %s Doppeltruhen für %s Materialarten (insgesamt %s Items).",
+
   "litematica_agent.storage.info": "Bekannte Truhen: %s, verschiedene Items: %s",
 
   "litematica_agent.warn.eat_failed": "Essen hat nicht funktioniert.",

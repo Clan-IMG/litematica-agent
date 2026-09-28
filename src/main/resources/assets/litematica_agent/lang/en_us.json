@@ -58,6 +58,7 @@
   "litematica_agent.help.home": "/agent home storage|build <command> – server home for far away storage/build sites",
   "litematica_agent.help.config": "/agent config [name value] – settings",
   "litematica_agent.help.deposit": "/agent deposit – bring leftover materials back to the storage",
+  "litematica_agent.help.stock": "/agent stock – creative only: fill chests with the schematic's materials, for stocking up before a survival run",
 
   "litematica_agent.home.cleared": "Home commands removed.",
   "litematica_agent.home.hint": "Example: /agent home storage home storage – the agent then uses /home storage when the storage is far away.",
@@ -69,7 +70,7 @@
   "litematica_agent.hud.materials": "Storage scan: %s/%s materials complete",
   "litematica_agent.hud.more": "… and %s more",
 
-  "litematica_agent.info.building_started": "Agent #%s is now building \"%s\". ESC pauses it and gives you control back.",
+  "litematica_agent.info.building_started": "Agent #%s is now building \"%s\". Use the Pause button to get control back.",
   "litematica_agent.info.cancelled": "Session #%s (%s) was cancelled and deleted.",
   "litematica_agent.info.completed": "Finished building \"%s\"! Active building time: %s (total since start: %s). %s blocks placed.",
   "litematica_agent.info.creative_detected": "Creative mode detected – storage management is skipped.",
@@ -89,19 +90,24 @@
   "litematica_agent.list.title": "Agent sessions:",
 
   "litematica_agent.lock.action": "Current action:",
+  "litematica_agent.lock.approve": "Approve",
   "litematica_agent.lock.cancel": "Cancel",
   "litematica_agent.lock.cancel_message": "Permanently delete session #%s (%s)? Built blocks stay.",
   "litematica_agent.lock.cancel_title": "Cancel session?",
   "litematica_agent.lock.depositing": "Bringing leftover materials to the storage",
   "litematica_agent.lock.eta": "Remaining: about %s minutes",
   "litematica_agent.lock.eta_estimate": "Remaining: about %s minutes (rough estimate)",
-  "litematica_agent.lock.hint_paused": "ESC: close this screen and play yourself",
-  "litematica_agent.lock.hint_running": "ESC: pause the agent and take control",
   "litematica_agent.lock.idle": "No active agent",
   "litematica_agent.lock.layer": "Layer Y=%s (%s of %s)",
   "litematica_agent.lock.leave": "Leave",
+  "litematica_agent.lock.mode": "Mode: %s",
+  "litematica_agent.lock.mode_ask": "Ask for approval",
+  "litematica_agent.lock.mode_ask_tooltip": "The agent stops at blocks that do not belong to the schematic and asks you before breaking them.",
+  "litematica_agent.lock.mode_skip": "Skip approval",
+  "litematica_agent.lock.mode_skip_tooltip": "Everything is allowed: the agent breaks blocks that do not belong to the schematic without asking.",
   "litematica_agent.lock.pause": "Pause",
   "litematica_agent.lock.progress": "Progress: %s%% (%s/%s blocks)",
+  "litematica_agent.lock.reject": "Reject",
   "litematica_agent.lock.resume": "Resume",
   "litematica_agent.lock.status": "Status: %s",
   "litematica_agent.lock.status_building": "BUILDING",
@@ -118,7 +124,7 @@
   "litematica_agent.pause.screen_opened": "Another menu was opened (%s).",
   "litematica_agent.pause.switched": "Switched to another session.",
   "litematica_agent.pause.unreachable_area": "The next build section at %s cannot be reached.",
-  "litematica_agent.pause.wrong_block": "At %s there is %s instead of %s. Remove the block yourself or allow the agent to break it with /agent config breakWrongBlocks true.",
+  "litematica_agent.pause.wrong_block": "At %s there is %s instead of %s. Approve to let the agent break it, or reject to keep it (this block is then skipped).",
 
   "litematica_agent.prepare.empty_inventory": "Please empty your inventory. Tools, food, armor and the offhand may stay – tools help the agent to remove helper blocks.",
   "litematica_agent.prepare.ready_creative": "Session #%s is ready.",
@@ -137,6 +143,7 @@
   "litematica_agent.reason.path": "no path found",
   "litematica_agent.reason.unknown": "unknown error",
   "litematica_agent.reason.unreachable": "not reachable",
+  "litematica_agent.reason.wrong_block": "another block is in the way (rejected)",
 
   "litematica_agent.scan.agent_working": "The agent is using this chest – ESC pauses it",
   "litematica_agent.scan.all": "Scan all",
@@ -163,6 +170,17 @@
 
   "litematica_agent.status.line": "#%s %s – %s – %s/%s blocks",
   "litematica_agent.status.none": "No agent active.",
+
+  "litematica_agent.stock.action_fill": "Filling the chest at %s",
+  "litematica_agent.stock.action_place": "Placing a chest at %s",
+  "litematica_agent.stock.cancel": "Cancel",
+  "litematica_agent.stock.creative_required": "This only works in creative mode.",
+  "litematica_agent.stock.done": "Done: %s double chests filled with %s items in total.",
+  "litematica_agent.stock.failed": "Chest stocking stopped: %s",
+  "litematica_agent.stock.level_progress": "Chest %s/%s",
+  "litematica_agent.stock.no_materials": "The schematic has no materials that could be stocked.",
+  "litematica_agent.stock.started": "Building %s double chests for %s material types (%s items in total).",
+
   "litematica_agent.storage.info": "Known chests: %s, different items: %s",
 
   "litematica_agent.warn.eat_failed": "Eating did not work.",

@@ -5,9 +5,11 @@ import net.clanimg.litematica_agent.LitematicaAgentClient;
 import net.clanimg.litematica_agent.config.AgentConfig;
 import net.clanimg.litematica_agent.gui.AgentLockScreen;
 import net.clanimg.litematica_agent.gui.AgentScreen;
+import net.clanimg.litematica_agent.gui.StockLockScreen;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
 import net.clanimg.litematica_agent.persistence.JsonStore;
 import net.clanimg.litematica_agent.persistence.WorldData;
+import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.schematic.PlacementRef;
 import net.clanimg.litematica_agent.schematic.SchematicAccess;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
@@ -35,6 +37,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,6 +63,7 @@ public final class AgentManager {
     private final SafetyMonitor safety = new SafetyMonitor(this);
     private @Nullable SessionRuntime focused;
     private @Nullable BuildAgent agent;
+    private @Nullable StockAgent stockAgent;
     private @Nullable SessionState promptedState;
     private boolean dirty;
     private long lastSave;
@@ -134,6 +138,7 @@ public final class AgentManager {
         }
         this.focused = null;
         this.agent = null;
+        this.stockAgent = null;
         this.promptedState = null;
         this.farStorageWarned = false;
         this.joinTicks = 0;
@@ -148,6 +153,10 @@ public final class AgentManager {
             }
             this.agent.suspend();
             this.agent = null;
+        }
+        if (this.stockAgent != null) {
+            this.stockAgent.suspend();
+            this.stockAgent = null;
         }
         this.save();
         this.worldKey = null;
@@ -195,6 +204,16 @@ public final class AgentManager {
             this.ensureLockScreen(client);
         }
 
+        if (this.stockAgent != null && this.checkStockScreen(client)) {
+            this.stockAgent.tick();
+            if (client.currentScreen == null) {
+                client.setScreen(new StockLockScreen());
+            }
+            if (this.stockAgent.isFinished()) {
+                this.completeStocking();
+            }
+        }
+
         this.safety.tick(client);
 
         if (this.dirty && System.currentTimeMillis() - this.lastSave > AUTOSAVE_MILLIS) {
@@ -234,6 +253,42 @@ public final class AgentManager {
     private void ensureLockScreen(MinecraftClient client) {
         if (this.agent != null && this.isAgentActive(this.agent) && client.currentScreen == null) {
             client.setScreen(new AgentLockScreen());
+        }
+    }
+
+    /**
+     * Same idea as {@link #checkScreen}, but for the chest-stocking helper: any screen the player opens themselves
+     * cancels the job instead of pausing it, since there is nothing to resume afterwards.
+     */
+    private boolean checkStockScreen(MinecraftClient client) {
+        Screen screen = client.currentScreen;
+        if (screen == null || screen instanceof StockLockScreen) {
+            return true;
+        }
+        if (screen instanceof HandledScreen<?> && this.stockAgent.isOperatingContainer()) {
+            return true;
+        }
+        if (screen instanceof ChatScreen || screen instanceof GameMenuScreen) {
+            client.setScreen(new StockLockScreen());
+            return true;
+        }
+        this.stockAgent.cancel("interrupted");
+        this.completeStocking();
+        return false;
+    }
+
+    private void completeStocking() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        StockAgent finished = this.stockAgent;
+        this.stockAgent = null;
+        finished.suspend();
+        if (client.currentScreen instanceof StockLockScreen) {
+            client.setScreen(null);
+        }
+        if (finished.isFailed()) {
+            Chat.warn(Chat.tr("stock.failed", finished.failureReason()));
+        } else {
+            Chat.success(Chat.tr("stock.done", finished.totalLevels(), finished.totalItemsNeeded()));
         }
     }
 
@@ -460,6 +515,66 @@ public final class AgentManager {
         this.save();
     }
 
+    /**
+     * {@code /agent stock}: creative-mode helper that builds a tower of double chests in front of the player and
+     * fills each one with the exact materials the loaded schematic needs, so a survival session can withdraw from
+     * them right away. Independent of the normal build session/{@link BuildAgent} pipeline.
+     */
+    public void startStocking() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientPlayerEntity player = client.player;
+        if (player == null || client.world == null) {
+            return;
+        }
+        if (this.agent != null || this.stockAgent != null) {
+            Chat.error(Chat.tr("error.agent_busy"));
+            return;
+        }
+        if (!player.isInCreativeMode()) {
+            Chat.error(Chat.tr("stock.creative_required"));
+            return;
+        }
+        SchematicPlacement placement = this.findPlacementForStart(player);
+        if (placement == null) {
+            Chat.error(Chat.tr("error.no_placement"));
+            return;
+        }
+        SchematicAccess.SchematicReadResult read;
+        try {
+            read = SchematicAccess.readTargets(placement);
+        } catch (RuntimeException e) {
+            LitematicaAgentClient.LOGGER.error("Could not read schematic {}", placement.getName(), e);
+            Chat.error(Chat.tr("error.read_failed", placement.getName()));
+            return;
+        }
+        Map<Item, Integer> materials = new LinkedHashMap<>();
+        for (BuildTarget target : read.targets()) {
+            materials.merge(target.item(), target.count(), Integer::sum);
+        }
+        if (materials.isEmpty()) {
+            Chat.error(Chat.tr("stock.no_materials"));
+            return;
+        }
+
+        StockAgent job = StockAgent.create(this, client, materials);
+        this.stockAgent = job;
+        job.activate();
+        Chat.success(Chat.tr("stock.started", job.totalLevels(), materials.size(), job.totalItemsNeeded()));
+        client.setScreen(new StockLockScreen());
+    }
+
+    public void cancelStocking() {
+        if (this.stockAgent == null) {
+            return;
+        }
+        this.stockAgent.cancel("cancelled");
+        this.completeStocking();
+    }
+
+    public @Nullable StockAgent stockAgent() {
+        return this.stockAgent;
+    }
+
     private @Nullable SchematicPlacement findPlacementForStart(ClientPlayerEntity player) {
         SchematicPlacement selected = SchematicAccess.getSelectedPlacement();
         if (selected != null && selected.isEnabled()) {
@@ -639,6 +754,18 @@ public final class AgentManager {
         }
     }
 
+    /**
+     * Answer to a wrong block in "ask for approval" mode: approved blocks get broken, rejected ones stay and their
+     * target is skipped. Building continues either way.
+     */
+    public void answerApproval(boolean approved) {
+        AgentSession session = this.activeSession();
+        if (this.agent == null || session == null || !this.agent.answerPendingApproval(approved)) {
+            return;
+        }
+        this.resume(session.id);
+    }
+
     private MutableText resumeButton(AgentSession session) {
         return Chat.button(Chat.tr("button.resume"), "/agent start " + session.id, Formatting.GREEN, Chat.tr("hover.resume"));
     }
@@ -742,6 +869,7 @@ public final class AgentManager {
             case "helper_not_removed" -> "helper_not_removed";
             case "interaction_failed", "state_changed" -> "interaction_failed";
             case "break_timeout" -> "break_timeout";
+            case "wrong_block" -> "wrong_block";
             default -> "unknown";
         };
     }

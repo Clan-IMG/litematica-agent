@@ -61,6 +61,7 @@ public final class AgentCommands {
                 .then(literal("list").executes(context -> list()))
                 .then(literal("status").executes(context -> status()))
                 .then(literal("deposit").executes(context -> run(manager::deposit)))
+                .then(literal("stock").executes(context -> run(manager::startStocking)))
                 .then(storage(manager))
                 .then(home(manager))
                 .then(config(manager)));
@@ -164,7 +165,7 @@ public final class AgentCommands {
 
     private static int help() {
         Chat.info(Chat.tr("help.title"));
-        for (String key : new String[]{"start", "start_id", "stop", "cancel", "list", "status", "storage", "home", "config", "deposit"}) {
+        for (String key : new String[]{"start", "start_id", "stop", "cancel", "list", "status", "storage", "home", "config", "deposit", "stock"}) {
             Chat.send(Text.literal("  ").append(Chat.tr("help." + key).formatted(Formatting.GRAY)));
         }
         return 1;

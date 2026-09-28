@@ -10,6 +10,7 @@ import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.ui.Chat;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.ChatScreen;
+import net.minecraft.client.gui.tooltip.Tooltip;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.input.KeyInput;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -18,7 +19,6 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.text.OrderedText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
-import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -43,8 +43,14 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     private static final int COLOR_PAUSED = 0xFFFBBF24;
 
     private final List<ButtonWidget> panelButtons = new ArrayList<>();
-    private @Nullable ButtonWidget pauseButton;
-    private @Nullable ButtonWidget resumeButton;
+    private final List<ButtonWidget> modeOptions = new ArrayList<>();
+    private ButtonWidget pauseButton;
+    private ButtonWidget resumeButton;
+    private ButtonWidget cancelButton;
+    private ButtonWidget approveButton;
+    private ButtonWidget rejectButton;
+    private ButtonWidget modeButton;
+    private boolean modeMenuOpen;
     private int panelX;
     private int panelY;
     private int panelHeight;
@@ -58,9 +64,11 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
         super.init();
         this.panelX = this.width - PANEL_WIDTH - 6;
         this.panelY = 6;
-        this.panelHeight = 200;
-        int buttonY = this.panelY + this.panelHeight - 26;
-        int buttonWidth = (PANEL_WIDTH - PADDING * 2 - 8) / 3;
+        this.panelHeight = 224;
+        int buttonY = this.panelY + this.panelHeight - 50;
+        int modeY = this.panelY + this.panelHeight - 26;
+        int fullWidth = PANEL_WIDTH - PADDING * 2;
+        int buttonWidth = (fullWidth - 8) / 3;
         int x = this.panelX + PADDING;
 
         this.pauseButton = this.addDrawableChild(ButtonWidget.builder(Chat.tr("lock.pause"), button -> AgentManager.get().pauseActive())
@@ -72,13 +80,46 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
                     }
                 })
                 .dimensions(x, buttonY, buttonWidth, 20).build());
-        ButtonWidget cancel = this.addDrawableChild(ButtonWidget.builder(Chat.tr("lock.cancel"), button -> this.confirmCancel())
+        this.approveButton = this.addDrawableChild(ButtonWidget.builder(Chat.tr("lock.approve"),
+                        button -> AgentManager.get().answerApproval(true))
+                .dimensions(x, buttonY, buttonWidth, 20).build());
+        this.cancelButton = this.addDrawableChild(ButtonWidget.builder(Chat.tr("lock.cancel"), button -> this.confirmCancel())
+                .dimensions(x + buttonWidth + 4, buttonY, buttonWidth, 20).build());
+        this.rejectButton = this.addDrawableChild(ButtonWidget.builder(Chat.tr("lock.reject"),
+                        button -> AgentManager.get().answerApproval(false))
                 .dimensions(x + buttonWidth + 4, buttonY, buttonWidth, 20).build());
         ButtonWidget leave = this.addDrawableChild(ButtonWidget.builder(Chat.tr("lock.leave"), button -> this.close())
                 .dimensions(x + (buttonWidth + 4) * 2, buttonY, buttonWidth, 20).build());
+
+        this.modeButton = this.addDrawableChild(ButtonWidget.builder(Text.empty(), button -> this.modeMenuOpen = !this.modeMenuOpen)
+                .dimensions(x, modeY, fullWidth, 20).build());
+        this.modeOptions.clear();
+        // The options open below the panel, like a dropdown list.
+        this.modeOptions.add(this.modeOption(false, x, this.panelY + this.panelHeight + 2, fullWidth));
+        this.modeOptions.add(this.modeOption(true, x, this.panelY + this.panelHeight + 24, fullWidth));
+
         this.panelButtons.clear();
-        this.panelButtons.addAll(List.of(this.pauseButton, this.resumeButton, cancel, leave));
+        this.panelButtons.addAll(List.of(this.pauseButton, this.resumeButton, this.approveButton, this.cancelButton,
+                this.rejectButton, leave, this.modeButton));
+        this.panelButtons.addAll(this.modeOptions);
         this.updateButtons();
+    }
+
+    private ButtonWidget modeOption(boolean skipApproval, int x, int y, int width) {
+        return this.addDrawableChild(ButtonWidget.builder(modeName(skipApproval), button -> {
+                    AgentManager manager = AgentManager.get();
+                    manager.config().breakWrongBlocks = skipApproval;
+                    manager.saveConfig();
+                    this.modeMenuOpen = false;
+                    this.updateButtons();
+                })
+                .dimensions(x, y, width, 20)
+                .tooltip(Tooltip.of(Chat.tr(skipApproval ? "lock.mode_skip_tooltip" : "lock.mode_ask_tooltip")))
+                .build());
+    }
+
+    private static Text modeName(boolean skipApproval) {
+        return Chat.tr(skipApproval ? "lock.mode_skip" : "lock.mode_ask");
     }
 
     @Override
@@ -88,14 +129,28 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     }
 
     private void updateButtons() {
-        AgentSession session = AgentManager.get().activeSession();
+        AgentManager manager = AgentManager.get();
+        AgentSession session = manager.activeSession();
+        BuildAgent agent = manager.activeAgent();
         boolean paused = session != null && session.state == SessionState.PAUSED;
-        if (this.pauseButton != null) {
-            this.pauseButton.visible = !paused;
-            this.pauseButton.active = session != null;
-        }
-        if (this.resumeButton != null) {
-            this.resumeButton.visible = paused;
+        boolean awaitingApproval = paused && agent != null && agent.hasPendingApproval();
+
+        this.pauseButton.visible = !paused;
+        this.pauseButton.active = session != null;
+        this.resumeButton.visible = paused && !awaitingApproval;
+        this.cancelButton.visible = !awaitingApproval;
+        this.approveButton.visible = awaitingApproval;
+        this.rejectButton.visible = awaitingApproval;
+
+        boolean skipApproval = manager.config().breakWrongBlocks;
+        this.modeButton.setMessage(Chat.tr("lock.mode", modeName(skipApproval)).append(" ▼"));
+        for (int i = 0; i < this.modeOptions.size(); i++) {
+            ButtonWidget option = this.modeOptions.get(i);
+            boolean optionSkips = i == 1;
+            option.visible = this.modeMenuOpen;
+            option.setMessage(optionSkips == skipApproval
+                    ? Text.literal("✔ ").append(modeName(optionSkips)).formatted(Formatting.GREEN)
+                    : modeName(optionSkips));
         }
     }
 
@@ -121,7 +176,7 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     }
 
     /**
-     * ESC or "leave": the agent stops and the player gets control back.
+     * "Leave": the agent stops and the player gets control back.
      */
     @Override
     public void close() {
@@ -135,6 +190,11 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
 
     @Override
     public boolean keyPressed(KeyInput input) {
+        if (input.isEscape()) {
+            // Only the panel buttons (Pause/Cancel/Leave) may close this screen, so an accidental
+            // ESC press cannot hand control back to the player.
+            return true;
+        }
         if (input.isEnter()) {
             String text = this.chatField.getText();
             if (!text.isBlank()) {
@@ -230,9 +290,6 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
         line = this.drawWrapped(context, paused ? Chat.tr("lock.waiting_for_player") : agent.action(), textX, line, COLOR_TEXT);
 
         this.drawInventory(context, textX, line + 2);
-
-        context.drawTextWithShadow(this.textRenderer, paused ? Chat.tr("lock.hint_paused") : Chat.tr("lock.hint_running"),
-                textX, bottom + 4, COLOR_MUTED);
     }
 
     private void drawInventory(DrawContext context, int x, int y) {

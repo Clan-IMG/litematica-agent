@@ -100,6 +100,10 @@ public final class BuildAgent {
     private final Set<Long> placedByAgent = new HashSet<>();
     private final LinkedHashSet<Long> helpers = new LinkedHashSet<>();
     private final Map<Long, String> failures = new LinkedHashMap<>();
+    /** Wrong blocks the player allowed or refused to break in "ask for approval" mode. */
+    private final Set<Long> approvedBreaks = new HashSet<>();
+    private final Set<Long> rejectedBreaks = new HashSet<>();
+    private @Nullable Long pendingApproval;
     private final Set<Item> missing = new LinkedHashSet<>();
     private final Set<String> warnings = new HashSet<>();
     private final Set<String> replacementTools = new LinkedHashSet<>();
@@ -161,6 +165,7 @@ public final class BuildAgent {
     void activate() {
         this.lastTickMillis = 0L;
         this.finalCheckDone = false;
+        this.pendingApproval = null;
         this.missing.clear();
         if (this.runtime != null) {
             this.runtime.plan().retryFailed();
@@ -322,6 +327,11 @@ public final class BuildAgent {
                     actionable.add(new Candidate(index, Kind.BREAK, distance));
                     continue;
                 }
+                if (this.rejectedBreaks.contains(pos.asLong())) {
+                    this.markFailed(index, "wrong_block");
+                    continue;
+                }
+                this.pendingApproval = pos.asLong();
                 this.pauseForWrongBlock(pos, state, target);
                 return;
             }
@@ -576,7 +586,7 @@ public final class BuildAgent {
 
     private boolean mayBreak(BlockPos pos, BlockState state) {
         long key = pos.asLong();
-        if (this.placedByAgent.contains(key) || this.helpers.contains(key)) {
+        if (this.placedByAgent.contains(key) || this.helpers.contains(key) || this.approvedBreaks.contains(key)) {
             return true;
         }
         if (this.config().breakWrongBlocks) {
@@ -586,6 +596,24 @@ public final class BuildAgent {
         boolean vegetation = block instanceof PlantBlock && !(block instanceof CropBlock) && !(block instanceof StemBlock)
                 && !(block instanceof SweetBerryBushBlock) && !(block instanceof NetherWartBlock);
         return vegetation || block instanceof SnowBlock || block instanceof VineBlock;
+    }
+
+    public boolean hasPendingApproval() {
+        return this.pendingApproval != null;
+    }
+
+    /**
+     * Records the player's answer for the wrong block the agent paused at.
+     *
+     * @return false if nothing was waiting for an answer
+     */
+    boolean answerPendingApproval(boolean approved) {
+        if (this.pendingApproval == null) {
+            return false;
+        }
+        (approved ? this.approvedBreaks : this.rejectedBreaks).add(this.pendingApproval);
+        this.pendingApproval = null;
+        return true;
     }
 
     private void pauseForWrongBlock(BlockPos pos, BlockState found, BuildTarget target) {
