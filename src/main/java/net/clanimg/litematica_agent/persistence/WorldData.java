@@ -1,6 +1,7 @@
 package net.clanimg.litematica_agent.persistence;
 
 import net.clanimg.litematica_agent.agent.AgentSession;
+import net.clanimg.litematica_agent.agent.BuildStrategy;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
 
 import java.util.ArrayList;
@@ -38,6 +39,15 @@ public final class WorldData {
             }
             if (session.pauseReason == null) {
                 session.pauseReason = "";
+            }
+            if (session.strategy == null) {
+                session.strategy = BuildStrategy.LAYERS;
+            }
+            if (session.blockQueue == null) {
+                session.blockQueue = new ArrayList<>();
+            }
+            if (session.helperBlocks == null) {
+                session.helperBlocks = new ArrayList<>();
             }
             this.nextSessionId = Math.max(this.nextSessionId, session.id + 1);
         }

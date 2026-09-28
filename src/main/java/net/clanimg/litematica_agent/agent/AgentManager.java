@@ -7,14 +7,17 @@ import net.clanimg.litematica_agent.gui.AgentLockScreen;
 import net.clanimg.litematica_agent.gui.AgentScreen;
 import net.clanimg.litematica_agent.gui.StockLockScreen;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
+import net.clanimg.litematica_agent.movement.RotationController;
 import net.clanimg.litematica_agent.persistence.JsonStore;
 import net.clanimg.litematica_agent.persistence.WorldData;
+import net.clanimg.litematica_agent.placement.StateMatcher;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.schematic.PlacementRef;
 import net.clanimg.litematica_agent.schematic.SchematicAccess;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
 import net.clanimg.litematica_agent.storage.StorageDatabase;
 import net.clanimg.litematica_agent.ui.Chat;
+import net.clanimg.litematica_agent.ui.Messages;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.client.gui.screen.DeathScreen;
@@ -29,16 +32,18 @@ import net.minecraft.registry.Registries;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.MutableText;
-import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -49,6 +54,8 @@ import java.util.Set;
 public final class AgentManager {
     private static final AgentManager INSTANCE = new AgentManager();
     private static final long AUTOSAVE_MILLIS = 30_000L;
+    private static final int FOOD_RESERVE = 64;
+    private static final int HELPER_RESERVE = 64;
 
     public record MaterialStatus(Item item, int needed, int found) {
         public boolean complete() {
@@ -71,6 +78,7 @@ public final class AgentManager {
     private boolean farStorageWarned;
     private @Nullable List<MaterialStatus> statusCache;
     private long statusCacheTime;
+    private long lastFrameNanos;
 
     private AgentManager() {
     }
@@ -81,6 +89,7 @@ public final class AgentManager {
 
     public void init() {
         this.config = JsonStore.loadConfig();
+        Messages.load(this.config.language);
     }
 
     public AgentConfig config() {
@@ -170,6 +179,9 @@ public final class AgentManager {
         if (this.focused != null) {
             this.focused.updateCounters();
         }
+        if (this.agent != null) {
+            this.agent.storeHelpers();
+        }
         this.worldData.storage = this.storage.toList();
         JsonStore.saveWorld(this.worldKey, this.worldData);
         this.dirty = false;
@@ -188,7 +200,7 @@ public final class AgentManager {
             long paused = this.worldData.sessions.stream().filter(s -> s.state == SessionState.PAUSED).count();
             if (paused > 0) {
                 Chat.info(Chat.tr("info.sessions_paused", paused).append(" ")
-                        .append(Chat.button(Chat.tr("button.list"), "/agent list", Formatting.AQUA, Chat.tr("hover.list"))));
+                        .append(Chat.button(Chat.tr("button.list"), "/agent list", Chat.tr("hover.list"))));
             }
         }
 
@@ -219,6 +231,36 @@ public final class AgentManager {
         if (this.dirty && System.currentTimeMillis() - this.lastSave > AUTOSAVE_MILLIS) {
             this.save();
         }
+    }
+
+    /**
+     * Called every rendered frame: turns the camera of a working agent in small steps, at most {@code agentFps} times
+     * per second. Movement itself stays tied to the 20 game ticks, like for every player.
+     */
+    public void onFrame() {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (player == null || this.config.agentFps <= AgentConfig.MIN_AGENT_FPS) {
+            this.lastFrameNanos = 0L;
+            return;
+        }
+        RotationController rotation = null;
+        if (this.agent != null && this.isAgentActive(this.agent)) {
+            rotation = this.agent.rotation();
+        } else if (this.stockAgent != null) {
+            rotation = this.stockAgent.rotation();
+        }
+        if (rotation == null) {
+            this.lastFrameNanos = 0L;
+            return;
+        }
+        long now = System.nanoTime();
+        if (this.lastFrameNanos != 0L && now - this.lastFrameNanos < 1_000_000_000L / this.config.agentFps) {
+            return;
+        }
+        // A long gap (first frame, lag) is capped so the camera never jumps.
+        double ticks = this.lastFrameNanos == 0L ? 0.0 : Math.min(2.0, (now - this.lastFrameNanos) / 50_000_000.0);
+        this.lastFrameNanos = now;
+        rotation.frame(player, ticks);
     }
 
     private boolean isAgentActive(BuildAgent candidate) {
@@ -262,7 +304,7 @@ public final class AgentManager {
      */
     private boolean checkStockScreen(MinecraftClient client) {
         Screen screen = client.currentScreen;
-        if (screen == null || screen instanceof StockLockScreen) {
+        if (screen == null || screen instanceof AgentScreen) {
             return true;
         }
         if (screen instanceof HandledScreen<?> && this.stockAgent.isOperatingContainer()) {
@@ -297,11 +339,17 @@ public final class AgentManager {
     private void tickPreparation(ClientPlayerEntity player) {
         AgentSession session = this.focused.session();
 
-        if (session.state.isPreparation() && player.isInCreativeMode()) {
+        if (session.state.isPreparation() && session.state != SessionState.CONFIRM_SKIPS && player.isInCreativeMode()) {
             this.setState(session, SessionState.READY);
         }
 
         switch (session.state) {
+            case CONFIRM_SKIPS -> {
+                if (this.promptedState != SessionState.CONFIRM_SKIPS) {
+                    this.promptedState = SessionState.CONFIRM_SKIPS;
+                    this.promptSkips(session);
+                }
+            }
             case CHECK_INVENTORY -> {
                 if (inventoryReady(player.getInventory())) {
                     this.setState(session, this.storage.isEmpty() ? SessionState.SCANNING_STORAGE : SessionState.CONFIRM_STORAGE);
@@ -315,16 +363,18 @@ public final class AgentManager {
                     this.promptedState = SessionState.CONFIRM_STORAGE;
                     Chat.info(Chat.tr("prepare.storage_known", this.storage.size()).append(" ")
                             .append(Chat.button(Chat.tr("button.storage_keep"), "/agent storage keep " + session.id,
-                                    Formatting.GREEN, Chat.tr("hover.storage_keep")))
+                                    Chat.tr("hover.storage_keep")))
                             .append(" ")
                             .append(Chat.button(Chat.tr("button.storage_rescan"), "/agent storage rescan " + session.id,
-                                    Formatting.GOLD, Chat.tr("hover.storage_rescan"))));
+                                    Chat.tr("hover.storage_rescan"))));
                 }
             }
             case SCANNING_STORAGE -> {
                 if (this.promptedState != SessionState.SCANNING_STORAGE) {
                     this.promptedState = SessionState.SCANNING_STORAGE;
                     Chat.info(Chat.tr("prepare.scan_instructions"));
+                    Chat.info(Chat.tr("prepare.start_anytime").append(" ").append(Chat.button(Chat.tr("button.start"),
+                            "/agent begin " + session.id, Chat.tr("hover.start_partial"))));
                 }
                 if (player.age % 20 == 0 && this.allMaterialsFound()) {
                     this.setState(session, SessionState.READY);
@@ -351,7 +401,52 @@ public final class AgentManager {
     private void sendReadyMessage(AgentSession session, boolean creative) {
         MutableText message = creative ? Chat.tr("prepare.ready_creative", session.id) : Chat.tr("prepare.ready_survival", session.id);
         Chat.success(message.append(" ").append(Chat.button(Chat.tr("button.start"), "/agent begin " + session.id,
-                Formatting.GREEN, Chat.tr("hover.start"))));
+                Chat.tr("hover.start"))));
+    }
+
+    private void promptSkips(AgentSession session) {
+        List<SchematicAccess.UnsupportedBlock> blocks = this.focused.unsupported();
+        Chat.warn(Chat.tr("skip.title", blocks.size()));
+        int shown = 0;
+        for (SchematicAccess.UnsupportedBlock block : blocks) {
+            if (shown++ == 5) {
+                Chat.send(Chat.tr("skip.more", blocks.size() - 5));
+                break;
+            }
+            Chat.send(Chat.tr("skip.line", block.state().getBlock().getName(), block.pos().toShortString(),
+                    Chat.tr("unsupported." + block.reason().name().toLowerCase(Locale.ROOT))));
+        }
+        Chat.info(Chat.tr("skip.question").append(" ")
+                .append(Chat.button(Chat.tr("button.accept_skip"), "/agent accept " + session.id, Chat.tr("hover.accept_skip")))
+                .append(" ")
+                .append(Chat.button(Chat.tr("button.cancel"), "/agent cancel " + session.id, Chat.tr("hover.cancel"))));
+    }
+
+    /**
+     * {@code /agent accept <id>}: the player agreed that the blocks which cannot be built are left out.
+     */
+    public void acceptSkips(int id) {
+        AgentSession session = this.findSession(id);
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        if (session == null || player == null || session.state != SessionState.CONFIRM_SKIPS || !this.focus(session)) {
+            return;
+        }
+        Chat.info(Chat.tr("skip.accepted", this.focused.unsupported().size()));
+        this.beginPreparation(session, player.isInCreativeMode());
+    }
+
+    private void beginPreparation(AgentSession session, boolean creative) {
+        this.setState(session, creative ? SessionState.READY : SessionState.CHECK_INVENTORY);
+        this.promptedState = null;
+        Chat.info(Chat.tr(creative ? "info.creative_detected" : "info.survival_detected"));
+        Set<StateMatcher.Tool> tools = this.focused == null ? Set.of() : this.focused.requiredTools();
+        if (!creative && !tools.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (StateMatcher.Tool tool : tools) {
+                names.add(Chat.tr("tool." + tool.name().toLowerCase(Locale.ROOT)).getString());
+            }
+            Chat.info(Chat.tr("prepare.tools_needed", String.join(", ", names)));
+        }
     }
 
     public static boolean inventoryReady(PlayerInventory inventory) {
@@ -413,12 +508,12 @@ public final class AgentManager {
     // ---------------------------------------------------------------- container scanning
 
     /**
-     * Stores the contents of an opened container in the storage database.
+     * Stores the selected slots of an opened container in the storage database. Only these slots are used later.
      *
-     * @param selected slot ids to record, or null for all container slots
+     * @param selected slot ids (of the handler) to record
      * @return number of recorded stacks
      */
-    public int scanContainer(BlockPos pos, ScreenHandler handler, @Nullable Set<Integer> selected) {
+    public int scanContainer(BlockPos pos, ScreenHandler handler, Set<Integer> selected) {
         MinecraftClient client = MinecraftClient.getInstance();
         ClientPlayerEntity player = client.player;
         if (player == null || client.world == null) {
@@ -426,15 +521,14 @@ public final class AgentManager {
         }
         String dimension = client.world.getRegistryKey().getValue().toString();
         ContainerRecord record = new ContainerRecord(dimension, pos.getX(), pos.getY(), pos.getZ());
+        record.slots = new ArrayList<>();
         int stacks = 0;
         for (Slot slot : handler.slots) {
-            if (slot.inventory == player.getInventory() || !slot.hasStack()) {
-                continue;
-            }
-            if (selected != null && !selected.contains(slot.id)) {
+            if (slot.inventory == player.getInventory() || !slot.hasStack() || !selected.contains(slot.id)) {
                 continue;
             }
             ItemStack stack = slot.getStack();
+            record.slots.add(slot.getIndex());
             record.add(Registries.ITEM.getId(stack.getItem()).toString(), stack.getCount());
             stacks++;
         }
@@ -443,6 +537,121 @@ public final class AgentManager {
         this.markDirty();
         this.warnIfStorageFar(pos);
         return stacks;
+    }
+
+    /**
+     * The slots "Scan all" selects. With a focused session only as many stacks as the build still needs beyond the
+     * inventory and the other known containers, plus every tool and small reserves of food and (without flight)
+     * helper blocks. Without a session every slot.
+     *
+     * @return slot ids of the handler
+     */
+    public Set<Integer> autoSelectSlots(BlockPos pos, ScreenHandler handler) {
+        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        Set<Integer> selected = new LinkedHashSet<>();
+        if (player == null || MinecraftClient.getInstance().world == null) {
+            return selected;
+        }
+        PlayerInventory inventory = player.getInventory();
+        String ownKey = ContainerRecord.key(MinecraftClient.getInstance().world.getRegistryKey().getValue().toString(),
+                pos.getX(), pos.getY(), pos.getZ());
+        Map<String, Integer> elsewhere = new HashMap<>();
+        for (ContainerRecord record : this.storage.containers()) {
+            if (!record.key().equals(ownKey)) {
+                record.items.forEach((id, count) -> elsewhere.merge(id, count, Integer::sum));
+            }
+        }
+
+        Map<Item, Integer> open = new HashMap<>();
+        if (this.focused != null) {
+            for (Map.Entry<Item, Integer> entry : this.focused.remainingMaterials().entrySet()) {
+                Item item = entry.getKey();
+                int missing = entry.getValue() - InventoryHelper.count(inventory, item)
+                        - elsewhere.getOrDefault(Registries.ITEM.getId(item).toString(), 0);
+                if (missing > 0) {
+                    open.put(item, missing);
+                }
+            }
+        }
+        int food = FOOD_RESERVE;
+        int helpers = this.config.useHelperBlocks && !player.getAbilities().allowFlying ? HELPER_RESERVE : 0;
+        Set<String> helperIds = Set.copyOf(this.config.helperBlocks);
+        for (int i = 0; i < InventoryHelper.MAIN_SIZE; i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (InventoryHelper.isFood(stack)) {
+                food -= stack.getCount();
+            } else if (helperIds.contains(Registries.ITEM.getId(stack.getItem()).toString())) {
+                helpers -= stack.getCount();
+            }
+        }
+        for (Map.Entry<String, Integer> entry : elsewhere.entrySet()) {
+            if (helperIds.contains(entry.getKey())) {
+                helpers -= entry.getValue();
+            } else if (InventoryHelper.isFood(new ItemStack(Registries.ITEM.get(Identifier.tryParse(entry.getKey()))))) {
+                food -= entry.getValue();
+            }
+        }
+
+        for (Slot slot : handler.slots) {
+            if (slot.inventory == inventory || !slot.hasStack()) {
+                continue;
+            }
+            ItemStack stack = slot.getStack();
+            if (this.focused == null) {
+                selected.add(slot.id);
+                continue;
+            }
+            int missing = open.getOrDefault(stack.getItem(), 0);
+            if (missing > 0) {
+                open.put(stack.getItem(), missing - stack.getCount());
+                selected.add(slot.id);
+            } else if (InventoryHelper.isUtility(stack)) {
+                selected.add(slot.id);
+            } else if (InventoryHelper.isFood(stack) && food > 0) {
+                food -= stack.getCount();
+                selected.add(slot.id);
+            } else if (helpers > 0 && helperIds.contains(Registries.ITEM.getId(stack.getItem()).toString())) {
+                helpers -= stack.getCount();
+                selected.add(slot.id);
+            }
+        }
+        return selected;
+    }
+
+    /**
+     * The player closed a known container: slots they filled become part of the selection and the counts follow what
+     * is in the container now, so items put back by hand are used again.
+     *
+     * @param before contents when the container was opened, by slot index
+     */
+    public void refreshContainer(BlockPos pos, ScreenHandler handler, Map<Integer, ItemStack> before) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientPlayerEntity player = client.player;
+        if (player == null || client.world == null) {
+            return;
+        }
+        ContainerRecord record = this.storage.get(ContainerRecord.key(client.world.getRegistryKey().getValue().toString(),
+                pos.getX(), pos.getY(), pos.getZ()));
+        if (record == null) {
+            return;
+        }
+        record.items.clear();
+        for (Slot slot : handler.slots) {
+            if (slot.inventory == player.getInventory() || !slot.hasStack()) {
+                continue;
+            }
+            ItemStack stack = slot.getStack();
+            ItemStack old = before.getOrDefault(slot.getIndex(), ItemStack.EMPTY);
+            boolean filled = !ItemStack.areItemsEqual(old, stack) || stack.getCount() > old.getCount();
+            if (filled && record.slots != null && !record.slots.contains(slot.getIndex())) {
+                record.slots.add(slot.getIndex());
+            }
+            if (record.allows(slot.getIndex())) {
+                record.add(Registries.ITEM.getId(stack.getItem()).toString(), stack.getCount());
+            }
+        }
+        record.scannedAt = System.currentTimeMillis();
+        this.markDirty();
     }
 
     private void warnIfStorageFar(BlockPos pos) {
@@ -502,15 +711,11 @@ public final class AgentManager {
         this.farStorageWarned = false;
 
         Chat.success(Chat.tr("info.session_created", session.id, session.name(), runtime.plan().size(), runtime.plan().doneCount()));
-        if (!runtime.unsupported().isEmpty()) {
-            Chat.warn(Chat.tr("warn.unsupported_blocks", runtime.unsupported().size()));
-        }
-        if (player.isInCreativeMode()) {
-            session.state = SessionState.READY;
-            Chat.info(Chat.tr("info.creative_detected"));
+        if (runtime.unsupported().isEmpty()) {
+            this.beginPreparation(session, player.isInCreativeMode());
         } else {
-            session.state = SessionState.CHECK_INVENTORY;
-            Chat.info(Chat.tr("info.survival_detected"));
+            // Asked in tickPreparation, before any inventory or storage step.
+            session.state = SessionState.CONFIRM_SKIPS;
         }
         this.save();
     }
@@ -554,6 +759,9 @@ public final class AgentManager {
         if (materials.isEmpty()) {
             Chat.error(Chat.tr("stock.no_materials"));
             return;
+        }
+        if (!read.unsupported().isEmpty()) {
+            Chat.warn(Chat.tr("warn.unsupported_blocks", read.unsupported().size()));
         }
 
         StockAgent job = StockAgent.create(this, client, materials);
@@ -609,7 +817,7 @@ public final class AgentManager {
             return;
         }
         switch (session.state) {
-            case PAUSED, READY, BUILDING -> this.beginBuilding(session);
+            case PAUSED, READY, BUILDING, SCANNING_STORAGE, CONFIRM_STORAGE -> this.beginBuilding(session);
             default -> {
                 this.promptedState = null;
                 Chat.info(Chat.tr("info.preparation_continued", session.id));
@@ -623,7 +831,7 @@ public final class AgentManager {
             Chat.error(Chat.tr("error.unknown_session", id));
             return;
         }
-        if (session.state.isPreparation()) {
+        if (!canBuild(session.state)) {
             Chat.warn(Chat.tr("error.not_ready", id));
             return;
         }
@@ -634,6 +842,14 @@ public final class AgentManager {
             return;
         }
         this.beginBuilding(session);
+    }
+
+    /**
+     * Building may start as soon as the skipped blocks are accepted and the inventory is empty: while scanning the
+     * storage the agent simply builds what the materials found so far allow.
+     */
+    private static boolean canBuild(SessionState state) {
+        return state != SessionState.CONFIRM_SKIPS && state != SessionState.CHECK_INVENTORY;
     }
 
     private boolean focus(AgentSession session) {
@@ -743,7 +959,7 @@ public final class AgentManager {
         if (reason.isEmpty()) {
             Chat.info(Chat.tr("info.paused", session.id).append(" ").append(this.resumeButton(session)));
         } else {
-            Chat.warn(Chat.tr("info.paused_reason", session.id).append(Chat.trList(reason, args))
+            Chat.warn(Chat.tr("info.paused_reason", session.id, Chat.trList(reason, args))
                     .append(" ").append(this.resumeButton(session)));
         }
     }
@@ -760,14 +976,14 @@ public final class AgentManager {
      */
     public void answerApproval(boolean approved) {
         AgentSession session = this.activeSession();
-        if (this.agent == null || session == null || !this.agent.answerPendingApproval(approved)) {
+        if (this.agent == null || session == null || !this.agent.answerPendingDecision(approved)) {
             return;
         }
         this.resume(session.id);
     }
 
     private MutableText resumeButton(AgentSession session) {
-        return Chat.button(Chat.tr("button.resume"), "/agent start " + session.id, Formatting.GREEN, Chat.tr("hover.resume"));
+        return Chat.button(Chat.tr("button.resume"), "/agent start " + session.id, Chat.tr("hover.resume"));
     }
 
     private void pauseActiveForSwitch() {
@@ -789,7 +1005,7 @@ public final class AgentManager {
         }
         if (!confirmed) {
             Chat.warn(Chat.tr("confirm.cancel", id, session.name()).append(" ")
-                    .append(Chat.button(Chat.tr("button.confirm_cancel"), "/agent cancel " + id + " confirm", Formatting.RED,
+                    .append(Chat.button(Chat.tr("button.confirm_cancel"), "/agent cancel " + id + " confirm",
                             Chat.tr("hover.confirm_cancel"))));
             return;
         }
@@ -837,7 +1053,7 @@ public final class AgentManager {
             int shown = 0;
             for (Map.Entry<Long, String> failure : failures.entrySet()) {
                 BlockPos pos = BlockPos.fromLong(failure.getKey());
-                Chat.warn(Text.literal(" - " + pos.toShortString() + ": ").append(Chat.tr("reason." + reasonKey(failure.getValue()))));
+                Chat.send(Chat.tr("warn.failed_block", pos.toShortString(), Chat.tr("reason." + reasonKey(failure.getValue()))));
                 if (++shown >= 5) {
                     break;
                 }
@@ -846,7 +1062,7 @@ public final class AgentManager {
         ClientPlayerEntity player = client.player;
         if (player != null && !player.isInCreativeMode() && hasLeftovers(player.getInventory()) && !this.storage.isEmpty()) {
             Chat.info(Chat.tr("info.leftovers").append(" ").append(Chat.button(Chat.tr("button.deposit"), "/agent deposit",
-                    Formatting.AQUA, Chat.tr("hover.deposit"))));
+                    Chat.tr("hover.deposit"))));
         }
         this.save();
     }
@@ -870,6 +1086,9 @@ public final class AgentManager {
             case "interaction_failed", "state_changed" -> "interaction_failed";
             case "break_timeout" -> "break_timeout";
             case "wrong_block" -> "wrong_block";
+            case "missing_material" -> "missing_material";
+            case "missing_tool" -> "missing_tool";
+            case "skipped" -> "skipped";
             default -> "unknown";
         };
     }

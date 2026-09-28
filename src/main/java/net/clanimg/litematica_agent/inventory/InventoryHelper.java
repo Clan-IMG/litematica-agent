@@ -34,6 +34,11 @@ public final class InventoryHelper {
         return !stack.isEmpty() && (stack.contains(DataComponentTypes.TOOL) || stack.isOf(Items.SHEARS));
     }
 
+    /** Tools the agent may need from the storage: mining tools, hoes, shovels, shears and flint and steel. */
+    public static boolean isUtility(ItemStack stack) {
+        return isTool(stack) || stack.isOf(Items.FLINT_AND_STEEL) || stack.isOf(Items.FIRE_CHARGE);
+    }
+
     public static boolean isFood(ItemStack stack) {
         return !stack.isEmpty() && stack.contains(DataComponentTypes.FOOD) && !UNSAFE_FOOD.contains(stack.getItem());
     }

@@ -13,10 +13,19 @@ public final class RotationController {
     private boolean hasTarget;
     private float maxYawStep = 35.0F;
     private float maxPitchStep = 25.0F;
+    private double settle = 0.4;
+    private float minStep = 1.5F;
 
-    public void setSpeed(float degreesPerTick) {
+    /**
+     * @param degreesPerTick fastest turn per tick
+     * @param settle         share of the remaining turn left after one tick close to the target (0..1)
+     * @param minStep        smallest turn per tick, so the last degrees do not crawl
+     */
+    public void setSpeed(float degreesPerTick, double settle, float minStep) {
         this.maxYawStep = Math.max(5.0F, degreesPerTick);
         this.maxPitchStep = Math.max(5.0F, degreesPerTick * 0.75F);
+        this.settle = Math.max(0.0, Math.min(0.95, settle));
+        this.minStep = Math.max(0.5F, minStep);
     }
 
     public void lookAt(Vec3d eye, Vec3d point) {
@@ -46,11 +55,27 @@ public final class RotationController {
         float pitch = player.getPitch();
         float yawDelta = MathHelper.wrapDegrees(this.targetYaw - yaw);
         float pitchDelta = this.targetPitch - pitch;
-        float yawStep = ease(yawDelta, this.maxYawStep);
-        float pitchStep = ease(pitchDelta, this.maxPitchStep);
+        float yawStep = this.ease(yawDelta, this.maxYawStep, 1.0);
+        float pitchStep = this.ease(pitchDelta, this.maxPitchStep, 1.0);
         player.setYaw(yaw + yawStep);
         player.setPitch(MathHelper.clamp(pitch + pitchStep, -90.0F, 90.0F));
         player.setHeadYaw(player.getYaw());
+    }
+
+    /**
+     * Turns by the share of a tick's turn that belongs to the time since the last frame. Goes through the same method
+     * as mouse input, so the view moves at the frame rate instead of 20 times per second.
+     *
+     * @param ticks game ticks since the last call (fractional)
+     */
+    public void frame(ClientPlayerEntity player, double ticks) {
+        if (!this.hasTarget || ticks <= 0.0) {
+            return;
+        }
+        float yawStep = this.ease(MathHelper.wrapDegrees(this.targetYaw - player.getYaw()), this.maxYawStep, ticks);
+        float pitchStep = this.ease(this.targetPitch - player.getPitch(), this.maxPitchStep, ticks);
+        // changeLookDirection takes mouse deltas and multiplies them by 0.15.
+        player.changeLookDirection(yawStep / 0.15, pitchStep / 0.15);
     }
 
     public boolean isAligned(ClientPlayerEntity player, float tolerance) {
@@ -62,16 +87,19 @@ public final class RotationController {
     }
 
     /**
-     * Large differences are covered at full speed, the last few degrees slow down like a real mouse movement.
+     * Large differences are covered at full speed, the last few degrees slow down like a real mouse movement. Scaled
+     * to {@code ticks}, so many small frame steps add up to the same turn as one tick step.
      */
-    private static float ease(float delta, float maxStep) {
+    float ease(float delta, float maxStep, double ticks) {
         float abs = Math.abs(delta);
         if (abs < 0.01F) {
             return delta;
         }
-        float step = abs > maxStep * 2.0F ? maxStep : Math.max(Math.min(abs, 1.5F), abs * 0.6F);
-        step = Math.min(step, maxStep);
-        return Math.copySign(Math.min(step, abs), delta);
+        double limit = maxStep * ticks;
+        double step = abs > maxStep * 2.0F ? limit
+                : Math.max(Math.min(abs, this.minStep * ticks), abs * (1.0 - Math.pow(this.settle, ticks)));
+        step = Math.min(step, limit);
+        return (float) Math.copySign(Math.min(step, abs), delta);
     }
 
     public static float[] anglesTo(Vec3d eye, Vec3d point) {

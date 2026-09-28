@@ -67,7 +67,7 @@ public class HomeTravelGameTest implements FabricClientGameTest {
                     new BlockHitResult(Vec3d.ofCenter(CHEST).add(0.0, 0.5, 0.0), Direction.UP, CHEST, false)));
             context.waitForScreen(GenericContainerScreen.class);
             context.waitTicks(5);
-            context.clickScreenButton("litematica_agent.scan.all");
+            GameTestSupport.clickButton(context, "scan.all");
             context.waitTicks(10);
             context.runOnClient(client -> client.player.closeHandledScreen());
             server.runCommand("tp @a 3 -60 3");

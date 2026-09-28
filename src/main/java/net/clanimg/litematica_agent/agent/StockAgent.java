@@ -1,5 +1,6 @@
 package net.clanimg.litematica_agent.agent;
 
+import net.clanimg.litematica_agent.config.AgentConfig;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
 import net.clanimg.litematica_agent.movement.InputController;
 import net.clanimg.litematica_agent.movement.MovementController;
@@ -244,7 +245,8 @@ public final class StockAgent {
         if (this.placeCooldown > 0) {
             this.placeCooldown--;
         }
-        this.rotation.setSpeed(this.manager.config().rotationSpeed);
+        AgentConfig config = this.manager.config();
+        this.rotation.setSpeed(config.rotationSpeed(), config.rotationSettle(), config.rotationMinStep());
         this.solver.setAllowLookTricks(this.manager.config().allowLookTricks);
 
         if (this.current == null) {
@@ -280,7 +282,13 @@ public final class StockAgent {
                 InputController.setJump(true);
             }
         }
-        this.rotation.tick(player);
+        if (this.manager.config().agentFps <= AgentConfig.MIN_AGENT_FPS) {
+            this.rotation.tick(player);
+        }
+    }
+
+    RotationController rotation() {
+        return this.rotation;
     }
 
     // ---------------------------------------------------------------- shared helpers
@@ -328,7 +336,7 @@ public final class StockAgent {
         if (result instanceof ActionResult.Success success && success.swingSource() == ActionResult.SwingSource.CLIENT) {
             player.swingHand(Hand.MAIN_HAND);
         }
-        this.placeCooldown = this.manager.config().placeDelayTicks;
+        this.placeCooldown = this.manager.config().placeDelayTicks();
     }
 
     private boolean placeCooldownReady() {
@@ -639,7 +647,7 @@ public final class StockAgent {
             if (StockAgent.this.client.currentScreen instanceof HandledScreen<?> screen
                     && screen.getScreenHandler() != player.playerScreenHandler) {
                 this.handler = screen.getScreenHandler();
-                this.clickCooldown = StockAgent.this.manager.config().containerClickDelayTicks;
+                this.clickCooldown = StockAgent.this.manager.config().containerClickDelayTicks();
                 return this.next(P.GIVE);
             }
             if (this.timer > 40) {
@@ -656,7 +664,7 @@ public final class StockAgent {
             if (--this.clickCooldown > 0) {
                 return Result.RUNNING;
             }
-            this.clickCooldown = StockAgent.this.manager.config().containerClickDelayTicks;
+            this.clickCooldown = StockAgent.this.manager.config().containerClickDelayTicks();
 
             if (this.currentItem == null) {
                 Map.Entry<Item, Integer> next = firstPositive(this.remaining);
@@ -685,7 +693,7 @@ public final class StockAgent {
             if (--this.clickCooldown > 0) {
                 return Result.RUNNING;
             }
-            this.clickCooldown = StockAgent.this.manager.config().containerClickDelayTicks;
+            this.clickCooldown = StockAgent.this.manager.config().containerClickDelayTicks();
 
             Slot target = null;
             for (Slot slot : this.handler.slots) {

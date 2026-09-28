@@ -108,7 +108,7 @@ public final class ChestScanOverlay {
     }
 
     public static int colorFor(ItemStack stack) {
-        if (InventoryHelper.isTool(stack)) {
+        if (InventoryHelper.isUtility(stack)) {
             return COLOR_TOOL;
         }
         if (InventoryHelper.isFood(stack)) {
@@ -128,6 +128,8 @@ public final class ChestScanOverlay {
         private final @Nullable BlockPos pos;
         private final Set<Integer> selected = new HashSet<>();
         private final Map<Integer, Integer> revealIndex = new HashMap<>();
+        /** Contents of a known container when it was opened, by slot index, to notice what the player put in. */
+        private final Map<Integer, ItemStack> contentsAtOpen = new HashMap<>();
         private final List<ClickableWidget> ownButtons = new ArrayList<>();
         private @Nullable ButtonWidget scanAll;
         private @Nullable ButtonWidget select;
@@ -168,36 +170,64 @@ public final class ChestScanOverlay {
                 this.scanAll.setTooltip(Tooltip.of(Chat.tr("scan.unknown_position")));
                 this.select.setTooltip(Tooltip.of(Chat.tr("scan.unknown_position")));
             } else {
-                ContainerRecord existing = AgentManager.get().storage().get(ContainerRecord.key(this.dimension(),
-                        this.pos.getX(), this.pos.getY(), this.pos.getZ()));
+                ContainerRecord existing = this.existingRecord();
                 if (existing != null) {
-                    this.reveal(this.containerSlotsWithItems(), false);
+                    this.reveal(this.recordedSlots(existing), false);
                     this.setStatus(Chat.tr("scan.known"), 0xFF9CA3AF);
+                    for (Slot slot : this.handler.slots) {
+                        if (this.isContainerSlot(slot)) {
+                            this.contentsAtOpen.put(slot.getIndex(), slot.getStack().copy());
+                        }
+                    }
                 }
             }
             this.updateVisibility();
 
-            ScreenEvents.afterRender(this.screen).register((s, context, mouseX, mouseY, delta) -> this.render(context, mouseX, mouseY));
+            // Drawn right after the container background, so the markings lie under the items, the hover highlight
+            // and the tooltip instead of on top of them.
+            ScreenEvents.afterBackground(this.screen).register((s, context, mouseX, mouseY, delta) -> this.render(context, mouseX, mouseY));
             ScreenMouseEvents.allowMouseClick(this.screen).register((s, click) -> this.allowClick(click));
             ScreenKeyboardEvents.allowKeyPress(this.screen).register((s, input) -> !this.selecting || input.isEscape());
+            ScreenEvents.remove(this.screen).register(s -> {
+                if (this.selecting) {
+                    // Closing the chest keeps a started selection instead of silently dropping it.
+                    if (!this.selected.isEmpty() || this.existingRecord() != null) {
+                        this.confirmSelection();
+                    }
+                } else if (this.pos != null && !this.contentsAtOpen.isEmpty()) {
+                    AgentManager.get().refreshContainer(this.pos, this.handler, this.contentsAtOpen);
+                }
+            });
         }
 
         private String dimension() {
             return this.client.world == null ? "" : this.client.world.getRegistryKey().getValue().toString();
         }
 
+        private @Nullable ContainerRecord existingRecord() {
+            if (this.pos == null) {
+                return null;
+            }
+            return AgentManager.get().storage().get(ContainerRecord.key(this.dimension(), this.pos.getX(), this.pos.getY(), this.pos.getZ()));
+        }
+
         private void scanAll() {
             if (this.pos == null) {
                 return;
             }
-            int stacks = AgentManager.get().scanContainer(this.pos, this.handler, null);
-            this.reveal(this.containerSlotsWithItems(), true);
+            Set<Integer> chosen = AgentManager.get().autoSelectSlots(this.pos, this.handler);
+            int stacks = AgentManager.get().scanContainer(this.pos, this.handler, chosen);
+            this.reveal(this.inSlotOrder(chosen), true);
             this.setStatus(Chat.tr("scan.done", stacks), 0xFF4ADE80);
         }
 
         private void startSelection() {
             this.selecting = true;
             this.selected.clear();
+            ContainerRecord existing = this.existingRecord();
+            if (existing != null) {
+                this.selected.addAll(this.recordedSlots(existing));
+            }
             this.setStatus(Chat.tr("scan.selecting"), 0xFFFBBF24);
             this.updateVisibility();
         }
@@ -209,15 +239,30 @@ public final class ChestScanOverlay {
             Set<Integer> chosen = new HashSet<>(this.selected);
             int stacks = AgentManager.get().scanContainer(this.pos, this.handler, chosen);
             this.selecting = false;
+            this.reveal(this.inSlotOrder(chosen), true);
+            this.setStatus(Chat.tr("scan.done", stacks), 0xFF4ADE80);
+            this.updateVisibility();
+        }
+
+        private List<Integer> inSlotOrder(Set<Integer> slotIds) {
             List<Integer> ordered = new ArrayList<>();
             for (Slot slot : this.handler.slots) {
-                if (chosen.contains(slot.id)) {
+                if (slotIds.contains(slot.id)) {
                     ordered.add(slot.id);
                 }
             }
-            this.reveal(ordered, true);
-            this.setStatus(Chat.tr("scan.done", stacks), 0xFF4ADE80);
-            this.updateVisibility();
+            return ordered;
+        }
+
+        /** Handler slot ids of the container slots the record allows the agent to use. */
+        private List<Integer> recordedSlots(ContainerRecord record) {
+            List<Integer> ids = new ArrayList<>();
+            for (Slot slot : this.handler.slots) {
+                if (this.isContainerSlot(slot) && slot.hasStack() && record.allows(slot.getIndex())) {
+                    ids.add(slot.id);
+                }
+            }
+            return ids;
         }
 
         private void stopSelection() {
@@ -238,16 +283,6 @@ public final class ChestScanOverlay {
         private void setStatus(Text text, int color) {
             this.status = text;
             this.statusColor = color;
-        }
-
-        private List<Integer> containerSlotsWithItems() {
-            List<Integer> ids = new ArrayList<>();
-            for (Slot slot : this.handler.slots) {
-                if (this.isContainerSlot(slot) && slot.hasStack()) {
-                    ids.add(slot.id);
-                }
-            }
-            return ids;
         }
 
         private void reveal(List<Integer> slotIds, boolean animated) {

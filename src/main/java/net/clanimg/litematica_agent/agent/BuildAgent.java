@@ -41,6 +41,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
@@ -54,18 +55,23 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntPredicate;
 import java.util.function.Predicate;
 
 /**
@@ -78,6 +84,13 @@ public final class BuildAgent {
     private static final int STAND_SPOT_CANDIDATES = 160;
     private static final int LOOKAHEAD_TARGETS = 4096;
     private static final int HELPER_STOCK = 32;
+    /** Helper blocks this far below the current layer are removed while building. */
+    private static final int HELPER_KEEP_BELOW = 3;
+    /** Finished targets checked against the world per tick: the whole build about every five seconds, within bounds. */
+    private static final int MIN_RESCAN_PER_TICK = 256;
+    private static final int MAX_RESCAN_PER_TICK = 2000;
+    /** Tasks started per tick at most: the one that just finished and the next one. */
+    private static final int TASKS_PER_TICK = 3;
     private static final Direction[] HELPER_DIRECTIONS = {
             Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP};
 
@@ -90,6 +103,17 @@ public final class BuildAgent {
     private record Candidate(int index, Kind kind, double distanceSq) {
     }
 
+    /** What the player is asked in "ask for approval" mode; answered with the two buttons of the lock screen. */
+    public enum DecisionKind {
+        /** A block that does not belong to the schematic: approving lets the agent break it. */
+        WRONG_BLOCK,
+        /** A block the agent cannot build by itself: the player may do it by hand and retry, or skip it. */
+        PROBLEM
+    }
+
+    private record PendingDecision(DecisionKind kind, int index, long pos, @Nullable StateMatcher.Tool tool) {
+    }
+
     private final AgentManager manager;
     private final @Nullable SessionRuntime runtime;
     private final MinecraftClient client;
@@ -100,10 +124,19 @@ public final class BuildAgent {
     private final Set<Long> placedByAgent = new HashSet<>();
     private final LinkedHashSet<Long> helpers = new LinkedHashSet<>();
     private final Map<Long, String> failures = new LinkedHashMap<>();
-    /** Wrong blocks the player allowed or refused to break in "ask for approval" mode. */
+    /** Wrong blocks the player allowed to break in "ask for approval" mode. */
     private final Set<Long> approvedBreaks = new HashSet<>();
-    private final Set<Long> rejectedBreaks = new HashSet<>();
-    private @Nullable Long pendingApproval;
+    /** Targets the player chose to skip, and tools the player chose to do without. */
+    private final Set<Long> skipped = new HashSet<>();
+    private final Set<StateMatcher.Tool> skippedTools = EnumSet.noneOf(StateMatcher.Tool.class);
+    /** Tools already fetched from the storage once since the last resume, so a failed fetch is not repeated forever. */
+    private final Set<StateMatcher.Tool> toolFetches = EnumSet.noneOf(StateMatcher.Tool.class);
+    private @Nullable PendingDecision pendingDecision;
+    /** With a block queue: targets that cannot be built yet because other block types are missing around them. */
+    private final Set<Long> notYet = new HashSet<>();
+    private int helperCleanupLayer = Integer.MIN_VALUE;
+    private int rescanCursor;
+    /** Materials neither in the inventory nor in the known storage; their blocks wait until the next resume. */
     private final Set<Item> missing = new LinkedHashSet<>();
     private final Set<String> warnings = new HashSet<>();
     private final Set<String> replacementTools = new LinkedHashSet<>();
@@ -129,6 +162,16 @@ public final class BuildAgent {
         this.manager = manager;
         this.runtime = runtime;
         this.client = client;
+        if (runtime != null) {
+            this.helpers.addAll(runtime.session().helperBlocks);
+        }
+    }
+
+    /** Copies the helper blocks into the session, so they are cleaned up even after a restart. */
+    void storeHelpers() {
+        if (this.runtime != null) {
+            this.runtime.session().helperBlocks = new ArrayList<>(this.helpers);
+        }
     }
 
     /**
@@ -165,7 +208,10 @@ public final class BuildAgent {
     void activate() {
         this.lastTickMillis = 0L;
         this.finalCheckDone = false;
-        this.pendingApproval = null;
+        this.pendingDecision = null;
+        this.toolFetches.clear();
+        this.notYet.clear();
+        this.movement.forgetFailures();
         this.missing.clear();
         if (this.runtime != null) {
             this.runtime.plan().retryFailed();
@@ -203,14 +249,31 @@ public final class BuildAgent {
         if (this.placeCooldown > 0) {
             this.placeCooldown--;
         }
-        this.rotation.setSpeed(this.config().rotationSpeed);
+        this.rotation.setSpeed(this.config().rotationSpeed(), this.config().rotationSettle(), this.config().rotationMinStep());
         this.solver.setAllowLookTricks(this.config().allowLookTricks);
+        if (this.runtime != null && this.manager.isBuilding(this)) {
+            this.rescanSome();
+        }
         this.movement.setSprintAllowed(this.config().sprint);
         InputController.take();
         InputController.clear();
         this.heldSneak = false;
 
-        if (this.task != null) {
+        // A finished block is followed by the next one within the same tick, so no tick passes without doing anything.
+        for (int step = 0; step < TASKS_PER_TICK; step++) {
+            if (this.task == null) {
+                if (this.runtime == null) {
+                    this.manager.finishDeposit(this);
+                    return;
+                }
+                if (!this.manager.isBuilding(this)) {
+                    break;
+                }
+                this.decide();
+                if (this.task == null) {
+                    break;
+                }
+            }
             AgentTask.Result result = this.task.tick(this);
             if (result == AgentTask.Result.RUNNING && ++this.taskTicks > this.task.timeoutTicks()) {
                 LitematicaAgentClient.LOGGER.warn("Aborting {} after {} ticks: {}", this.task.getClass().getSimpleName(),
@@ -218,14 +281,13 @@ public final class BuildAgent {
                 this.task.cancel(this);
                 result = AgentTask.Result.FAILED;
             }
-            if (result != AgentTask.Result.RUNNING) {
-                this.finishTask(result);
+            if (result == AgentTask.Result.RUNNING) {
+                break;
             }
-        } else if (this.runtime == null) {
-            this.manager.finishDeposit(this);
-            return;
-        } else if (this.manager.isBuilding(this)) {
-            this.decide();
+            this.finishTask(result);
+            if (result != AgentTask.Result.SUCCESS) {
+                break;
+            }
         }
 
         if (this.heldSneak) {
@@ -235,7 +297,9 @@ public final class BuildAgent {
                 InputController.setJump(true);
             }
         }
-        this.rotation.tick(player);
+        if (this.config().agentFps <= AgentConfig.MIN_AGENT_FPS) {
+            this.rotation.tick(player);
+        }
 
         if (this.tick % 20 == 0 && this.runtime != null) {
             this.eta.sample(this.runtime.session().activeMillis, this.completedWhileActive);
@@ -283,6 +347,15 @@ public final class BuildAgent {
             return;
         }
 
+        int layerY = plan.currentLayerY();
+        if (this.runtime.session().strategy == BuildStrategy.LAYERS && layerY != this.helperCleanupLayer) {
+            this.helperCleanupLayer = layerY;
+            this.removeHelpersBelow(layerY);
+            if (!this.pendingHelperRemovals.isEmpty()) {
+                return;
+            }
+        }
+
         String buildHome = this.manager.worldData().buildHomeCommand;
         if (!buildHome.isEmpty() && this.tick - this.lastHomeTick > 20 * 10
                 && SchematicAccess.distanceTo(this.runtime.placement(), player.getEntityPos()) > this.config().homeDistance) {
@@ -291,7 +364,15 @@ public final class BuildAgent {
             return;
         }
 
-        List<Integer> indices = plan.candidates(this.tick);
+        List<Integer> indices;
+        if (this.runtime.session().strategy == BuildStrategy.BLOCKS) {
+            indices = this.blockCandidates(plan);
+            if (indices == null || this.task != null) {
+                return;
+            }
+        } else {
+            indices = plan.candidates(this.tick);
+        }
         if (indices.isEmpty()) {
             this.action = Chat.tr("action.waiting");
             return;
@@ -300,6 +381,7 @@ public final class BuildAgent {
         Vec3d eye = player.getEyePos();
         List<Candidate> actionable = new ArrayList<>();
         Set<Item> needed = new LinkedHashSet<>();
+        Map<Item, Boolean> inInventory = new HashMap<>();
         BuildTarget farTarget = null;
 
         for (int index : indices) {
@@ -311,6 +393,10 @@ public final class BuildAgent {
                 }
                 continue;
             }
+            if (this.skipped.contains(pos.asLong())) {
+                this.markFailed(index, "skipped");
+                continue;
+            }
             BlockState state = world.getBlockState(pos);
             if (StateMatcher.isComplete(state, target.state())) {
                 this.markDone(index);
@@ -318,6 +404,21 @@ public final class BuildAgent {
             }
             double distance = eye.squaredDistanceTo(Vec3d.ofCenter(pos));
             if (StateMatcher.needsInteraction(state, target.state())) {
+                StateMatcher.Tool tool = StateMatcher.toolFor(state, target.state());
+                if (tool != null && !this.hasTool(tool)) {
+                    if (this.skippedTools.contains(tool)) {
+                        this.markFailed(index, "missing_tool");
+                        continue;
+                    }
+                    if (this.toolFetches.add(tool) && this.startToolFetch(tool)) {
+                        return;
+                    }
+                    if (this.problem(index, "missing_tool", tool, "pause.missing_tool",
+                            List.of(blockName(target), pos.toShortString(), toolName(tool)))) {
+                        return;
+                    }
+                    continue;
+                }
                 actionable.add(new Candidate(index, Kind.INTERACT, distance));
                 continue;
             }
@@ -327,24 +428,31 @@ public final class BuildAgent {
                     actionable.add(new Candidate(index, Kind.BREAK, distance));
                     continue;
                 }
-                if (this.rejectedBreaks.contains(pos.asLong())) {
+                if (this.config().wrongBlockMode == AgentConfig.WrongBlockMode.SKIP) {
                     this.markFailed(index, "wrong_block");
                     continue;
                 }
-                this.pendingApproval = pos.asLong();
+                this.pendingDecision = new PendingDecision(DecisionKind.WRONG_BLOCK, index, pos.asLong(), null);
                 this.pauseForWrongBlock(pos, state, target);
                 return;
             }
             if (BuildCategory.needsBlockBelow(target.state()) && this.isAirLike(pos.down())) {
-                if (plan.indexOf(pos.down().asLong()) < 0) {
-                    this.markFailed(index, "falling_without_support");
-                } else {
-                    this.defer(index, "waiting_for_support");
+                boolean paused = plan.indexOf(pos.down().asLong()) < 0
+                        ? this.problem(index, "falling_without_support", null, "pause.cannot_place",
+                                this.problemArgs(target, "falling_without_support"))
+                        : this.defer(index, "waiting_for_support");
+                if (paused) {
+                    return;
                 }
                 continue;
             }
-            if (!player.isInCreativeMode() && InventoryHelper.count(player.getInventory(), target.item()) == 0) {
-                needed.add(target.item());
+            if (!player.isInCreativeMode() && !inInventory.computeIfAbsent(target.item(),
+                    item -> InventoryHelper.count(player.getInventory(), item) > 0)) {
+                if (this.missing.contains(target.item())) {
+                    this.markFailed(index, "missing_material");
+                } else {
+                    needed.add(target.item());
+                }
                 continue;
             }
             actionable.add(new Candidate(index, Kind.PLACE, distance));
@@ -356,13 +464,19 @@ public final class BuildAgent {
         if (!this.isStable()) {
             return;
         }
-        for (int i = 0; i < Math.min(NEAR_CANDIDATES, actionable.size()); i++) {
-            Candidate candidate = actionable.get(i);
+        // Of the blocks close by, the one that needs the smallest turn of the camera comes first: small turns are
+        // quick, and everything in reach gets done before walking on.
+        List<Candidate> near = new ArrayList<>(actionable.subList(0, Math.min(NEAR_CANDIDATES, actionable.size())));
+        Vec3d look = player.getRotationVec(1.0F);
+        near.sort(Comparator.comparingDouble(candidate ->
+                -look.dotProduct(Vec3d.ofCenter(plan.get(candidate.index()).pos()).subtract(eye).normalize())));
+        for (Candidate candidate : near) {
             BuildTarget target = plan.get(candidate.index());
             switch (candidate.kind()) {
                 case PLACE -> {
-                    if (!this.isPlayerInTheWay(target) && this.solver.findFromEye(player, target, eye, this.reach()) != null) {
-                        this.start(new PlaceTask(candidate.index(), target, null));
+                    BuildTarget placement = placement(target);
+                    if (!this.isPlayerInTheWay(placement) && this.solver.findFromEye(player, placement, eye, this.reach()) != null) {
+                        this.start(new PlaceTask(candidate.index(), placement, null));
                         return;
                     }
                 }
@@ -398,27 +512,32 @@ public final class BuildAgent {
                         return;
                     }
                     searches++;
-                    if (!this.solver.isFeasible(player, target)) {
-                        if (this.trySupportHelper(candidate.index(), target)) {
+                    BuildTarget placement = placement(target);
+                    if (!this.solver.isFeasible(player, placement)) {
+                        if (this.trySupportHelper(candidate.index(), placement)) {
                             return;
                         }
-                        this.defer(candidate.index(), "no_support");
+                        if (this.defer(candidate.index(), "no_support")) {
+                            return;
+                        }
                         continue;
                     }
-                    PlacementSolver.StandSpot spot = this.findPlaceSpot(target);
+                    PlacementSolver.StandSpot spot = this.findPlaceSpot(placement);
                     if (spot != null) {
-                        this.start(new PlaceTask(candidate.index(), target, spot.feet()));
+                        this.start(new PlaceTask(candidate.index(), placement, spot.feet()));
                         return;
                     }
-                    this.defer(candidate.index(), "no_stand_spot");
+                    if (this.defer(candidate.index(), "no_stand_spot")) {
+                        return;
+                    }
                 }
             }
         }
 
         if (!needed.isEmpty()) {
             if (!this.startRestock(needed)) {
+                // Nothing of it can be fetched: build everything else first; these blocks are left for later.
                 this.missing.addAll(needed);
-                this.manager.pause(this, "pause.missing_materials", List.of(itemList(needed)));
             }
             return;
         }
@@ -434,6 +553,30 @@ public final class BuildAgent {
             return;
         }
         this.action = Chat.tr("action.waiting");
+    }
+
+    /**
+     * Candidates of the first queued block type that still has targets to build. Targets of that type that cannot be
+     * built yet (nothing to attach to because other block types are still missing) are put aside, not treated as
+     * problems.
+     *
+     * @return null when the whole queue is done; the agent then pauses
+     */
+    private @Nullable List<Integer> blockCandidates(BuildPlan<BuildTarget> plan) {
+        for (String id : this.runtime.session().blockQueue) {
+            Item item = Registries.ITEM.get(Identifier.tryParse(id));
+            IntPredicate open = index -> plan.get(index).item() == item && !this.notYet.contains(plan.position(index));
+            List<Integer> candidates = plan.candidates(this.tick, open);
+            // An empty list while targets of the type are only deferred means: wait for them, do not skip ahead.
+            if (!candidates.isEmpty() || plan.hasPending(open)) {
+                return candidates;
+            }
+        }
+        if (this.startHelperCleanup()) {
+            return List.of();
+        }
+        this.manager.pause(this, "pause.queue_done", List.of(String.valueOf(this.notYet.size())));
+        return null;
     }
 
     private void finishOrVerify() {
@@ -459,25 +602,89 @@ public final class BuildAgent {
             this.finalCheckDone = true;
         }
 
+        if (this.startHelperCleanup()) {
+            return;
+        }
+        if (!this.missing.isEmpty()) {
+            // Keep the session so it can be finished after more materials were added to the storage.
+            this.manager.pause(this, "pause.materials_incomplete", List.of(itemList(this.missing)));
+            return;
+        }
+        this.manager.complete(this);
+    }
+
+    /**
+     * Checks a slice of the finished targets against the world every tick, so a block someone removed or changed is
+     * built again soon instead of only at the final check.
+     */
+    private void rescanSome() {
+        BuildPlan<BuildTarget> plan = this.runtime.plan();
+        ClientWorld world = this.world();
+        int count = Math.min(plan.size(), Math.max(MIN_RESCAN_PER_TICK, Math.min(MAX_RESCAN_PER_TICK, plan.size() / 100)));
+        for (int n = 0; n < count; n++) {
+            if (this.rescanCursor >= plan.size()) {
+                this.rescanCursor = 0;
+            }
+            int index = this.rescanCursor++;
+            if (plan.status(index) != BuildPlan.Status.DONE) {
+                continue;
+            }
+            BuildTarget target = plan.get(index);
+            BlockPos pos = target.pos();
+            if (world.isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)
+                    && !StateMatcher.isComplete(world.getBlockState(pos), target.state())) {
+                plan.markPending(index);
+            }
+        }
+    }
+
+    /** A player, mob or armor stand where the block goes: that clears up by itself, so it is no reason to give up. */
+    private boolean isOccupiedByEntity(BlockPos pos) {
+        return !this.world().getOtherEntities(this.player(), new Box(pos),
+                entity -> entity.isAlive() && entity instanceof LivingEntity).isEmpty();
+    }
+
+    /**
+     * Breaks the next leftover helper block, top first: the agent may be standing on its own pillar and digs down like
+     * a player would.
+     *
+     * @return true if a break task was started
+     */
+    private boolean startHelperCleanup() {
+        BuildPlan<BuildTarget> plan = this.runtime.plan();
         List<Long> remaining = new ArrayList<>(this.helpers);
-        // Top first: the agent may be standing on its own pillar and digs down like a player would.
         remaining.sort(Comparator.comparingInt((Long key) -> BlockPos.fromLong(key).getY()).reversed());
         for (Long helper : remaining) {
             BlockPos pos = BlockPos.fromLong(helper);
-            if (plan.indexOf(helper) >= 0) {
-                this.helpers.remove(helper);
+            if (!this.world().isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) {
                 continue;
             }
-            if (this.isAirLike(pos)) {
+            if (plan.indexOf(helper) >= 0 || this.isAirLike(pos)) {
                 this.helpers.remove(helper);
                 continue;
             }
             this.action = Chat.tr("action.cleanup");
             this.start(new BreakTask(-1, pos));
-            return;
+            return true;
         }
+        return false;
+    }
 
-        this.manager.complete(this);
+    /**
+     * Once the build has moved up, pillars well below the current layer are no longer needed to reach anything and are
+     * removed right away instead of standing around until the end. The column under the player stays.
+     */
+    private void removeHelpersBelow(int layerY) {
+        BlockPos feet = this.player().getBlockPos();
+        List<Long> below = new ArrayList<>();
+        for (Long helper : this.helpers) {
+            BlockPos pos = BlockPos.fromLong(helper);
+            if (pos.getY() < layerY - HELPER_KEEP_BELOW && (pos.getX() != feet.getX() || pos.getZ() != feet.getZ())) {
+                below.add(helper);
+            }
+        }
+        below.sort(Comparator.comparingInt((Long key) -> BlockPos.fromLong(key).getY()).reversed());
+        this.pendingHelperRemovals.addAll(below);
     }
 
     private void finishTask(AgentTask.Result result) {
@@ -571,17 +778,68 @@ public final class BuildAgent {
         LitematicaAgentClient.LOGGER.info("Giving up on {} at {}: {}", target.state(), target.pos().toShortString(), reason);
     }
 
-    private void defer(int index, String reason) {
+    /**
+     * Tries the target again later; after too many attempts it becomes a {@link #problem}.
+     *
+     * @return true if the agent paused so the player can decide
+     */
+    private boolean defer(int index, String reason) {
         BuildPlan<BuildTarget> plan = this.runtime.plan();
         if (this.config().verboseLogging) {
             LitematicaAgentClient.LOGGER.info("Deferring {} ({}), attempt {}", plan.get(index).pos().toShortString(), reason,
                     plan.attempts(index) + 1);
         }
         if (plan.attempts(index) + 1 >= MAX_ATTEMPTS) {
-            this.markFailed(index, reason);
-            return;
+            if (this.isOccupiedByEntity(plan.get(index).pos())) {
+                plan.defer(index, this.tick, 100L);
+                return false;
+            }
+            if (this.runtime.session().strategy == BuildStrategy.BLOCKS) {
+                // With a block queue the support may simply be of a block type that is not built yet.
+                this.notYet.add(plan.position(index));
+                plan.resetAttempts(index);
+                return false;
+            }
+            return this.problem(index, reason, null, "pause.cannot_place", this.problemArgs(plan.get(index), reason));
         }
         plan.defer(index, this.tick, 40L * (plan.attempts(index) + 1));
+        return false;
+    }
+
+    /**
+     * A target the agent cannot finish by itself. In "ask for approval" mode the agent pauses, so the player can do it
+     * by hand and retry, or skip it; in the other modes it is skipped right away.
+     *
+     * @param tool the missing tool, if that is the problem
+     * @return true if the agent paused
+     */
+    private boolean problem(int index, String reason, @Nullable StateMatcher.Tool tool, String pauseKey, List<String> args) {
+        if (this.config().wrongBlockMode == AgentConfig.WrongBlockMode.ASK) {
+            this.pendingDecision = new PendingDecision(DecisionKind.PROBLEM, index, this.runtime.plan().position(index), tool);
+            this.manager.pause(this, pauseKey, args);
+            return true;
+        }
+        this.markFailed(index, reason);
+        return false;
+    }
+
+    private List<String> problemArgs(BuildTarget target, String reason) {
+        return List.of(blockName(target), target.pos().toShortString(),
+                Chat.tr("reason." + AgentManager.reasonKey(reason)).getString());
+    }
+
+    private static String blockName(BuildTarget target) {
+        return target.state().getBlock().getName().getString();
+    }
+
+    private static String toolName(StateMatcher.Tool tool) {
+        return Chat.tr("tool." + tool.name().toLowerCase(Locale.ROOT)).getString();
+    }
+
+    /** What is placed for a target: farmland and dirt paths start as dirt and are converted with a tool later. */
+    private static BuildTarget placement(BuildTarget target) {
+        BlockState state = StateMatcher.placementState(target.state());
+        return state == target.state() ? target : new BuildTarget(target.pos(), state, target.item(), 1);
     }
 
     private boolean mayBreak(BlockPos pos, BlockState state) {
@@ -589,7 +847,7 @@ public final class BuildAgent {
         if (this.placedByAgent.contains(key) || this.helpers.contains(key) || this.approvedBreaks.contains(key)) {
             return true;
         }
-        if (this.config().breakWrongBlocks) {
+        if (this.config().wrongBlockMode == AgentConfig.WrongBlockMode.ALLOW) {
             return true;
         }
         Block block = state.getBlock();
@@ -598,21 +856,33 @@ public final class BuildAgent {
         return vegetation || block instanceof SnowBlock || block instanceof VineBlock;
     }
 
-    public boolean hasPendingApproval() {
-        return this.pendingApproval != null;
+    public @Nullable DecisionKind pendingDecision() {
+        return this.pendingDecision == null ? null : this.pendingDecision.kind();
     }
 
     /**
-     * Records the player's answer for the wrong block the agent paused at.
+     * Records the player's answer: approve breaks a wrong block or retries a problem (e.g. after placing it by hand or
+     * adding the tool), reject skips the block (or everything that needs the missing tool).
      *
      * @return false if nothing was waiting for an answer
      */
-    boolean answerPendingApproval(boolean approved) {
-        if (this.pendingApproval == null) {
+    boolean answerPendingDecision(boolean approved) {
+        PendingDecision decision = this.pendingDecision;
+        if (decision == null) {
             return false;
         }
-        (approved ? this.approvedBreaks : this.rejectedBreaks).add(this.pendingApproval);
-        this.pendingApproval = null;
+        this.pendingDecision = null;
+        if (!approved) {
+            if (decision.tool() != null) {
+                this.skippedTools.add(decision.tool());
+            } else {
+                this.skipped.add(decision.pos());
+            }
+        } else if (decision.kind() == DecisionKind.WRONG_BLOCK) {
+            this.approvedBreaks.add(decision.pos());
+        } else if (this.runtime != null) {
+            this.runtime.plan().resetAttempts(decision.index());
+        }
         return true;
     }
 
@@ -768,7 +1038,7 @@ public final class BuildAgent {
             }
             BuildAgent.this.clickBlock(hit);
             BuildAgent.this.helpers.add(below.up().asLong());
-            BuildAgent.this.placeCooldown = BuildAgent.this.config().placeDelayTicks;
+            BuildAgent.this.placeCooldown = BuildAgent.this.config().placeDelayTicks();
             return true;
         }
 
@@ -939,7 +1209,7 @@ public final class BuildAgent {
         ClientPlayerEntity player = this.player();
         record.items.clear();
         for (Slot slot : handler.slots) {
-            if (slot.inventory != player.getInventory() && slot.hasStack()) {
+            if (slot.inventory != player.getInventory() && slot.hasStack() && record.allows(slot.getIndex())) {
                 record.add(itemId(slot.getStack().getItem()), slot.getStack().getCount());
             }
         }
@@ -1046,7 +1316,7 @@ public final class BuildAgent {
                 if ((flags & NavWorld.SOLID_TOP) != 0) {
                     return (flags & (NavWorld.DANGER | NavWorld.PASSABLE)) == 0;
                 }
-                if ((flags & NavWorld.PASSABLE) == 0 || (flags & (NavWorld.WATER | NavWorld.DANGER)) != 0) {
+                if ((flags & NavWorld.PASSABLE) == 0 || (flags & (NavWorld.WATER | NavWorld.DANGER | NavWorld.OCCUPIED)) != 0) {
                     return false;
                 }
             }
@@ -1111,7 +1381,7 @@ public final class BuildAgent {
         if (result instanceof ActionResult.Success success && success.swingSource() == ActionResult.SwingSource.CLIENT) {
             player.swingHand(Hand.MAIN_HAND);
         }
-        this.placeCooldown = this.config().placeDelayTicks;
+        this.placeCooldown = this.config().placeDelayTicks();
     }
 
     public void onBlockPlaced(BlockPos pos) {
@@ -1133,6 +1403,58 @@ public final class BuildAgent {
     public void onBlockRemoved(BlockPos pos) {
         this.placedByAgent.remove(pos.asLong());
         this.helpers.remove(pos.asLong());
+    }
+
+    private boolean hasTool(StateMatcher.Tool tool) {
+        ClientPlayerEntity player = this.player();
+        return player.isInCreativeMode() || InventoryHelper.find(player.getInventory(), tool::matches) >= 0;
+    }
+
+    /**
+     * Puts a matching tool into the main hand; in creative mode one is taken from the creative inventory.
+     */
+    public boolean selectTool(StateMatcher.Tool tool) {
+        ClientPlayerEntity player = this.player();
+        if (player.isInCreativeMode()) {
+            return InventoryHelper.select(this.client, tool.creativeItem());
+        }
+        if (tool.matches(player.getMainHandStack())) {
+            return true;
+        }
+        int slot = InventoryHelper.find(player.getInventory(), tool::matches);
+        if (slot < 0) {
+            return false;
+        }
+        InventoryHelper.selectSlot(this.client, slot);
+        return tool.matches(player.getMainHandStack());
+    }
+
+    /**
+     * Fetches one matching tool (any hoe, any shovel, ...) from the known storage.
+     */
+    private boolean startToolFetch(StateMatcher.Tool tool) {
+        StorageDatabase storage = this.manager.storage();
+        Vec3d pos = this.player().getEntityPos();
+        for (Map.Entry<String, Integer> entry : storage.totals().entrySet()) {
+            Item item = Registries.ITEM.get(Identifier.tryParse(entry.getKey()));
+            if (entry.getValue() <= 0 || !tool.matches(new ItemStack(item))) {
+                continue;
+            }
+            LinkedHashMap<String, Integer> needs = new LinkedHashMap<>();
+            needs.put(entry.getKey(), 1);
+            WithdrawalPlanner.Plan plan = WithdrawalPlanner.plan(storage, this.dimensionId(), pos.x, pos.y, pos.z, needs,
+                    Math.max(1, InventoryHelper.freeSlots(this.player().getInventory())), BuildAgent::maxStackSize);
+            if (plan.isEmpty()) {
+                continue;
+            }
+            List<ContainerTask.Visit> visits = new ArrayList<>();
+            for (WithdrawalPlanner.Visit visit : plan.visits()) {
+                visits.add(new ContainerTask.Visit(visit.container(), visit.take()));
+            }
+            this.start(new ContainerTask(ContainerTask.Mode.WITHDRAW, visits));
+            return true;
+        }
+        return false;
     }
 
     public void protectTool(ItemStack stack) {
@@ -1235,10 +1557,6 @@ public final class BuildAgent {
 
     public Map<Long, String> failures() {
         return this.failures;
-    }
-
-    public Set<Item> missingItems() {
-        return this.missing;
     }
 
     private void warnOnce(String key) {

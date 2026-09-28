@@ -6,7 +6,9 @@
   "client": [
     "BlockItemInvoker",
     "HandledScreenAccessor",
-    "KeyboardInputMixin"
+    "InteractionManagerInvoker",
+    "KeyboardInputMixin",
+    "MouseMixin"
   ],
   "injectors": {
     "defaultRequire": 1

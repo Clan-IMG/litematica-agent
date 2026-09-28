@@ -1,5 +1,6 @@
 package net.clanimg.litematica_agent.movement;
 
+import net.clanimg.litematica_agent.LitematicaAgentClient;
 import net.clanimg.litematica_agent.movement.pathing.AStarPathfinder;
 import net.clanimg.litematica_agent.movement.pathing.Goal;
 import net.clanimg.litematica_agent.movement.pathing.MoveType;
@@ -14,8 +15,10 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.LongPredicate;
 
@@ -27,6 +30,9 @@ public final class MovementController {
     private static final int MAX_REPATHS = 4;
     private static final int PATH_NODE_BUDGET = 20_000;
     private static final int MAX_SEGMENTS = 64;
+    private static final long NO_PILLAR_MILLIS = 60_000L;
+    /** Longest time for breaking one block below the feet (stone by hand takes about 8 seconds). */
+    private static final int MAX_DIG_TICKS = 20 * 20;
 
     public enum Status {
         IDLE,
@@ -50,6 +56,8 @@ public final class MovementController {
 
     private final RotationController rotation;
     private final Set<Long> noFlyColumns = new HashSet<>();
+    /** Positions where pillaring failed, with the time until which they are avoided. */
+    private final Map<Long, Long> noPillarUntil = new HashMap<>();
 
     private @Nullable Goal goal;
     private @Nullable PathOptions baseOptions;
@@ -67,6 +75,7 @@ public final class MovementController {
     private int segments;
     private int flyToggleTicks;
     private int pillarTicks;
+    private int digTicks;
     private boolean sprintAllowed = true;
     private @Nullable LongPredicate virtualSolid;
     private @Nullable LongPredicate helperPositions;
@@ -104,7 +113,8 @@ public final class MovementController {
         PathOptions options = canFly ? PathOptions.flying() : PathOptions.walking();
         return options.withHelperBlocks(canFly ? 0 : helperBlocks)
                 .withMaxNodes(PATH_NODE_BUDGET)
-                .withNoFly(column -> this.noFlyColumns.contains(column));
+                .withNoFly(column -> this.noFlyColumns.contains(column))
+                .withNoPillar(pos -> this.noPillarUntil.getOrDefault(pos, 0L) > System.currentTimeMillis());
     }
 
     /**
@@ -137,6 +147,7 @@ public final class MovementController {
                 .find(feet.getX(), feet.getY(), feet.getZ(), this.goal, this.baseOptions);
 
         this.resetProgress();
+        this.digTicks = 0;
         if (result.reachedGoal() && result.nodes().size() <= 1) {
             this.path = result.nodes();
             this.index = 0;
@@ -154,6 +165,11 @@ public final class MovementController {
         this.index = 0;
         this.status = Status.MOVING;
         return true;
+    }
+
+    /** Forgets spots where moving failed, e.g. when the player resumes after fixing something. */
+    public void forgetFailures() {
+        this.noPillarUntil.clear();
     }
 
     public void stop() {
@@ -216,8 +232,12 @@ public final class MovementController {
         }
 
         if (next.move() == MoveType.DIG_DOWN) {
-            this.tickDigDown(player, next, helpers);
-            this.checkStuck(player, next);
+            if (this.tickDigDown(player, next, helpers)) {
+                // Breaking a block by hand takes seconds without the player moving; that is progress, not being stuck.
+                this.resetProgress();
+            } else {
+                this.checkStuck(player, next);
+            }
             return this.status;
         }
 
@@ -322,6 +342,11 @@ public final class MovementController {
 
         this.pillarTicks++;
         if (this.pillarTicks > 60 || helpers.available() <= 0) {
+            if (this.pillarTicks > 60) {
+                // Something at this spot prevents pillaring (low ceiling, someone in the way...): plan around it for a
+                // while. It may be possible again later, so the spot is not blocked for good.
+                this.noPillarUntil.put(PosUtil.pack(from.x(), from.y(), from.z()), System.currentTimeMillis() + NO_PILLAR_MILLIS);
+            }
             this.pillarTicks = 0;
             this.fail("pillar_failed");
             return;
@@ -351,16 +376,25 @@ public final class MovementController {
         }
     }
 
-    private void tickDigDown(ClientPlayerEntity player, PathNode next, HelperBlocks helpers) {
+    /**
+     * @return true while the block below is being mined
+     */
+    private boolean tickDigDown(ClientPlayerEntity player, PathNode next, HelperBlocks helpers) {
         BlockPos below = new BlockPos(next.x(), next.y(), next.z());
         if (horizontalDistance(player.getEntityPos(), center(next)) > 0.25) {
             this.steerHorizontally(player, next, true);
-            return;
+            return false;
         }
         this.rotation.setTarget(player.getYaw(), 90.0F);
-        if (player.getPitch() > 80.0F && player.isOnGround()) {
-            helpers.mine(below);
+        if (player.getPitch() <= 80.0F || !player.isOnGround()) {
+            return false;
         }
+        if (++this.digTicks > MAX_DIG_TICKS) {
+            this.fail("dig_failed");
+            return false;
+        }
+        helpers.mine(below);
+        return true;
     }
 
     private void steerHorizontally(ClientPlayerEntity player, PathNode next, boolean pressForward) {
@@ -389,6 +423,7 @@ public final class MovementController {
             boolean isLast = i == this.path.size() - 1;
             if (isAt(player, node, isLast ? 0.3 : 0.45)) {
                 this.index = i;
+                this.digTicks = 0;
                 this.resetProgress();
                 return;
             }
@@ -463,6 +498,13 @@ public final class MovementController {
     }
 
     private void fail(String reason) {
+        if (this.path != null && this.index + 1 < this.path.size()) {
+            PathNode next = this.path.get(this.index + 1);
+            LitematicaAgentClient.LOGGER.info("Movement failed ({}): next step {} to {} {} {}", reason, next.move(),
+                    next.x(), next.y(), next.z());
+        } else {
+            LitematicaAgentClient.LOGGER.info("Movement failed ({})", reason);
+        }
         this.status = Status.FAILED;
         this.failure = reason;
         this.path = null;

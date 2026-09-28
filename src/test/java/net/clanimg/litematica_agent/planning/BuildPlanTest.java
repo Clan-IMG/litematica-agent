@@ -36,6 +36,21 @@ class BuildPlanTest {
     }
 
     @Test
+    void filteredCandidatesSkipLayersWithoutMatches() {
+        // x = 1 stands for the block type in the queue; layer 64 only has other types.
+        List<Block> blocks = List.of(new Block(0, 64, 0, 0), new Block(1, 65, 0, 0), new Block(1, 66, 0, 0));
+        BuildPlan<Block> plan = plan(blocks);
+
+        List<Integer> candidates = plan.candidates(0, index -> plan.get(index).x() == 1);
+        assertEquals(1, candidates.size());
+        assertEquals(65, plan.get(candidates.get(0)).y());
+        assertTrue(plan.hasPending(index -> plan.get(index).y() == 66));
+
+        plan.defer(candidates.get(0), 0, 100);
+        assertEquals(66, plan.get(plan.candidates(0, index -> plan.get(index).x() == 1).get(0)).y());
+    }
+
+    @Test
     void respectsCategoryOrderInsideLayer() {
         List<Block> blocks = List.of(
                 new Block(0, 64, 0, BuildCategory.POWER_SOURCE.ordinal()),

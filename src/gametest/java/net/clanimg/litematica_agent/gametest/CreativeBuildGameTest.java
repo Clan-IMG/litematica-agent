@@ -3,6 +3,7 @@ package net.clanimg.litematica_agent.gametest;
 import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import net.clanimg.litematica_agent.agent.AgentManager;
 import net.clanimg.litematica_agent.agent.AgentSession;
+import net.clanimg.litematica_agent.config.AgentConfig;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestServerContext;
@@ -11,7 +12,7 @@ import net.minecraft.util.math.BlockPos;
 
 /**
  * Creative end-to-end test: the agent rebuilds a small hut with orientation-sensitive blocks and redstone parts
- * that are adjusted after placement.
+ * that are adjusted after placement. It runs at the fastest speed, which must still build every block exactly.
  */
 public class CreativeBuildGameTest implements FabricClientGameTest {
     private static final BlockPos MIN = new BlockPos(5, -60, 5);
@@ -20,6 +21,15 @@ public class CreativeBuildGameTest implements FabricClientGameTest {
     @Override
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
+        context.runOnClient(client -> AgentManager.get().config().speed = AgentConfig.FASTEST_SPEED);
+        try {
+            this.buildAndCheck(context);
+        } finally {
+            context.runOnClient(client -> AgentManager.get().config().speed = AgentConfig.DEFAULT_SPEED);
+        }
+    }
+
+    private void buildAndCheck(ClientGameTestContext context) {
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getClientWorld().waitForChunksRender();
             TestServerContext server = singleplayer.getServer();

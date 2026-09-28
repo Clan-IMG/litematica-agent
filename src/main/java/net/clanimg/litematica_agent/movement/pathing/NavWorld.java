@@ -17,6 +17,8 @@ public interface NavWorld {
     int UNLOADED = 1 << 5;
     /** A helper block placed by the agent itself; it may be dug away to climb down. */
     int HELPER = 1 << 6;
+    /** Passable, but taken by a block a placed block cannot replace (lever, torch, flower, open door...). */
+    int OCCUPIED = 1 << 7;
 
     int flags(int x, int y, int z);
 }

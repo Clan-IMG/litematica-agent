@@ -151,7 +151,7 @@ public final class ContainerTask implements AgentTask {
                 if (agent.client().currentScreen instanceof HandledScreen<?> screen
                         && screen.getScreenHandler() != player.playerScreenHandler) {
                     this.handler = screen.getScreenHandler();
-                    this.clickCooldown = agent.config().containerClickDelayTicks;
+                    this.clickCooldown = agent.config().containerClickDelayTicks();
                     this.next(Phase.TRANSFER);
                     return Result.RUNNING;
                 }
@@ -179,9 +179,9 @@ public final class ContainerTask implements AgentTask {
                 if (--this.clickCooldown > 0) {
                     return Result.RUNNING;
                 }
-                this.clickCooldown = agent.config().containerClickDelayTicks;
+                this.clickCooldown = agent.config().containerClickDelayTicks();
                 boolean clicked = this.mode == Mode.WITHDRAW
-                        ? this.withdrawOne(agent, player)
+                        ? this.withdrawOne(agent, player, container)
                         : this.depositOne(agent, player);
                 if (!clicked) {
                     this.next(Phase.CLOSE);
@@ -189,6 +189,9 @@ public final class ContainerTask implements AgentTask {
             }
             case CLOSE -> {
                 if (this.handler != null) {
+                    if (this.mode == Mode.DEPOSIT) {
+                        this.includeDepositedSlots(container, visit, player);
+                    }
                     agent.syncContainer(container, this.handler);
                 }
                 player.closeHandledScreen();
@@ -199,7 +202,7 @@ public final class ContainerTask implements AgentTask {
         return Result.RUNNING;
     }
 
-    private boolean withdrawOne(BuildAgent agent, ClientPlayerEntity player) {
+    private boolean withdrawOne(BuildAgent agent, ClientPlayerEntity player, ContainerRecord container) {
         if (InventoryHelper.freeSlots(player.getInventory()) == 0) {
             return false;
         }
@@ -209,7 +212,7 @@ public final class ContainerTask implements AgentTask {
             }
             Slot best = null;
             for (Slot slot : this.handler.slots) {
-                if (slot.inventory == player.getInventory() || !slot.hasStack()) {
+                if (slot.inventory == player.getInventory() || !slot.hasStack() || !container.allows(slot.getIndex())) {
                     continue;
                 }
                 ItemStack stack = slot.getStack();
@@ -257,6 +260,22 @@ public final class ContainerTask implements AgentTask {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Deposited items may land in slots outside the player's selection; those slots become part of it so the stored
+     * leftovers stay usable.
+     */
+    private void includeDepositedSlots(ContainerRecord container, Visit visit, ClientPlayerEntity player) {
+        if (container.slots == null) {
+            return;
+        }
+        for (Slot slot : this.handler.slots) {
+            if (slot.inventory != player.getInventory() && slot.hasStack() && visit.items().containsKey(itemId(slot.getStack()))
+                    && !container.slots.contains(slot.getIndex())) {
+                container.slots.add(slot.getIndex());
+            }
+        }
     }
 
     private void nextVisit(BuildAgent agent, boolean skipped) {

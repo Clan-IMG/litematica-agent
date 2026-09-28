@@ -188,8 +188,10 @@ public final class AStarPathfinder {
             }
         }
 
+        // The helper block goes where the feet are now, so that block must be free to build in.
         if (options.helperBlocks() > 0 && !inWater && !climbableHere
-                && supported && !this.has(x, y, z, NavWorld.SOLID_TOP)
+                && supported && !this.has(x, y, z, NavWorld.SOLID_TOP) && !this.has(x, y, z, NavWorld.OCCUPIED)
+                && !options.noPillar().test(PosUtil.pack(x, y, z))
                 && this.canOccupy(x, y + 1, z)) {
             out.add(new Step(x, y + 1, z, MoveType.PILLAR, COST_PILLAR));
         }

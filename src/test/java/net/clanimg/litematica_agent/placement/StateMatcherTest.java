@@ -25,6 +25,34 @@ class StateMatcherTest {
     }
 
     @Test
+    void litCandleNeedsFlintAndSteel() {
+        BlockState target = Blocks.CANDLE.getDefaultState().with(Properties.CANDLES, 2).with(Properties.LIT, true);
+        BlockState placed = target.with(Properties.LIT, false);
+        assertFalse(StateMatcher.isComplete(placed, target));
+        assertTrue(StateMatcher.needsInteraction(placed, target));
+        assertEquals(StateMatcher.Tool.FLINT_AND_STEEL, StateMatcher.toolFor(placed, target));
+        assertEquals(StateMatcher.Tool.FLINT_AND_STEEL, StateMatcher.toolNeeded(target));
+        assertTrue(StateMatcher.isComplete(target, target));
+    }
+
+    @Test
+    void campfireIsPutOutWithAShovel() {
+        BlockState target = Blocks.CAMPFIRE.getDefaultState().with(Properties.LIT, false);
+        assertEquals(StateMatcher.Tool.SHOVEL, StateMatcher.toolFor(target.with(Properties.LIT, true), target));
+        assertEquals(StateMatcher.Tool.SHOVEL, StateMatcher.toolNeeded(target));
+    }
+
+    @Test
+    void farmlandIsPlacedAsDirtAndHoed() {
+        BlockState farmland = Blocks.FARMLAND.getDefaultState();
+        assertEquals(Blocks.DIRT.getDefaultState(), StateMatcher.placementState(farmland));
+        assertTrue(StateMatcher.needsInteraction(Blocks.DIRT.getDefaultState(), farmland));
+        assertEquals(StateMatcher.Tool.HOE, StateMatcher.toolFor(Blocks.GRASS_BLOCK.getDefaultState(), farmland));
+        assertFalse(StateMatcher.needsInteraction(Blocks.STONE.getDefaultState(), farmland));
+        assertTrue(StateMatcher.isComplete(farmland.with(Properties.MOISTURE, 7), farmland));
+    }
+
+    @Test
     void stairsNeedSameFacingAndHalf() {
         BlockState target = Blocks.OAK_STAIRS.getDefaultState().with(Properties.HORIZONTAL_FACING, Direction.EAST);
         assertTrue(StateMatcher.isComplete(target, target));

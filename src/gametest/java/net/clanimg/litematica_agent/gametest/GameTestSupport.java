@@ -10,6 +10,7 @@ import net.clanimg.litematica_agent.agent.AgentSession;
 import net.clanimg.litematica_agent.placement.StateMatcher;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.schematic.SchematicAccess;
+import net.clanimg.litematica_agent.ui.Chat;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
@@ -24,6 +25,16 @@ final class GameTestSupport {
     static final Logger LOGGER = LoggerFactory.getLogger("litematica_agent_gametest");
 
     private GameTestSupport() {
+    }
+
+    /**
+     * Clicks the button showing the mod text {@code messageKey}. The texts come from the mod's message files, not from
+     * the game's language files, so the button is looked up by the text it shows (a key unknown to the game's language
+     * translates to itself).
+     */
+    static void clickButton(ClientGameTestContext context, String messageKey) {
+        String label = context.computeOnClient(client -> Chat.tr(messageKey).getString());
+        context.clickScreenButton(label);
     }
 
     /**

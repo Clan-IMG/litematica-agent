@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntPredicate;
 import java.util.function.ToIntFunction;
 import java.util.function.ToLongFunction;
 
@@ -194,6 +195,13 @@ public final class BuildPlan<T> {
      * lowest category present in that layer. Deferred targets are skipped until their retry time.
      */
     public List<Integer> candidates(long now) {
+        return this.candidates(now, index -> true);
+    }
+
+    /**
+     * Like {@link #candidates(long)}, but only among the targets accepted by {@code filter}.
+     */
+    public List<Integer> candidates(long now, IntPredicate filter) {
         this.advanceLowestLayer();
         List<Integer> result = new ArrayList<>();
         for (int layer = this.lowestOpenLayer; layer < this.layerYs.length; layer++) {
@@ -201,7 +209,7 @@ public final class BuildPlan<T> {
             int end = this.layerStarts[layer + 1];
             int minCategory = Integer.MAX_VALUE;
             for (int i = start; i < end; i++) {
-                if (this.status[i] == Status.PENDING && this.retryAt[i] <= now) {
+                if (this.status[i] == Status.PENDING && this.retryAt[i] <= now && filter.test(i)) {
                     minCategory = Math.min(minCategory, this.categories[i]);
                 }
             }
@@ -209,13 +217,32 @@ public final class BuildPlan<T> {
                 continue;
             }
             for (int i = start; i < end; i++) {
-                if (this.status[i] == Status.PENDING && this.retryAt[i] <= now && this.categories[i] == minCategory) {
+                if (this.status[i] == Status.PENDING && this.retryAt[i] <= now && this.categories[i] == minCategory
+                        && filter.test(i)) {
                     result.add(i);
                 }
             }
             return result;
         }
         return result;
+    }
+
+    /** Whether a pending target accepted by {@code filter} exists, including deferred ones. */
+    public boolean hasPending(IntPredicate filter) {
+        for (int i = 0; i < this.size(); i++) {
+            if (this.status[i] == Status.PENDING && filter.test(i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Target indices of a layer as {start, end (exclusive)}. */
+    public int[] layerBounds(int layerIndex) {
+        if (layerIndex < 0 || layerIndex >= this.layerYs.length) {
+            return new int[]{0, 0};
+        }
+        return new int[]{this.layerStarts[layerIndex], this.layerStarts[layerIndex + 1]};
     }
 
     /**

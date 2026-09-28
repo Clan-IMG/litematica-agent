@@ -63,6 +63,36 @@ class AStarPathfinderTest {
     }
 
     @Test
+    void neverPillarsIntoOccupiedBlocks() {
+        TestWorld world = shaft().set(0, FEET, 0, NavWorld.PASSABLE | NavWorld.OCCUPIED);
+        PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(0, FEET + 2, 0),
+                PathOptions.walking().withHelperBlocks(4).withMaxNodes(5_000));
+
+        assertFalse(result.reachedGoal());
+    }
+
+    @Test
+    void avoidsSpotsWherePillaringFailed() {
+        TestWorld world = shaft();
+        PathOptions options = PathOptions.walking().withHelperBlocks(4).withMaxNodes(5_000);
+        assertTrue(new AStarPathfinder(world).find(0, FEET, 0, Goal.block(0, FEET + 2, 0), options).reachedGoal());
+
+        long failed = PosUtil.pack(0, FEET, 0);
+        PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(0, FEET + 2, 0),
+                options.withNoPillar(pos -> pos == failed));
+        assertFalse(result.reachedGoal());
+    }
+
+    /** A one-block shaft around the start position, so pillaring right there is the only way up. */
+    private static TestWorld shaft() {
+        return new TestWorld(FLOOR)
+                .wall(-1, -1, 1, -1, FEET, FEET + 5)
+                .wall(-1, 1, 1, 1, FEET, FEET + 5)
+                .wall(-1, 0, -1, 0, FEET, FEET + 5)
+                .wall(1, 0, 1, 0, FEET, FEET + 5);
+    }
+
+    @Test
     void dropsDownAtMostThreeBlocks() {
         TestWorld world = new TestWorld(FLOOR).hole(3, -20, 20, 20);
         for (int x = 3; x <= 20; x++) {

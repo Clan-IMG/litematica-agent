@@ -4,6 +4,7 @@ import net.clanimg.litematica_agent.agent.AgentManager;
 import net.clanimg.litematica_agent.command.AgentCommands;
 import net.clanimg.litematica_agent.gui.AgentHud;
 import net.clanimg.litematica_agent.gui.ChestScanOverlay;
+import net.clanimg.litematica_agent.inventory.AutoTool;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
@@ -11,6 +12,9 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +38,12 @@ public class LitematicaAgentClient implements ClientModInitializer {
         HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT, Identifier.of(MOD_ID, "hud"), hud::render);
 
         ChestScanOverlay.register();
+        AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
+            if (world.isClient()) {
+                AutoTool.onAttackBlock(MinecraftClient.getInstance(), pos);
+            }
+            return ActionResult.PASS;
+        });
         LOGGER.info("Litematica Agent initialized");
     }
 }

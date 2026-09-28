@@ -7,7 +7,6 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.input.KeyInput;
-import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import org.jetbrains.annotations.Nullable;
 
@@ -18,7 +17,7 @@ import org.jetbrains.annotations.Nullable;
 public final class StockLockScreen extends ChatScreen implements AgentScreen {
     private static final int PANEL_WIDTH = 230;
     private static final int PADDING = 8;
-    private static final int PANEL_HEIGHT = 90;
+    private static final int PANEL_HEIGHT = 118;
     private static final int COLOR_PANEL = 0xB0101418;
     private static final int COLOR_BORDER = 0xFF2DD4BF;
     private static final int COLOR_TEXT = 0xFFE5E7EB;
@@ -28,6 +27,7 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
     private static final int COLOR_BAR = 0xFF22C55E;
 
     private @Nullable ButtonWidget cancelButton;
+    private @Nullable ConfigSlider speedSlider;
     private int panelX;
     private int panelY;
 
@@ -41,7 +41,8 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
         this.panelX = this.width - PANEL_WIDTH - 6;
         this.panelY = 6;
         int buttonY = this.panelY + PANEL_HEIGHT - 26;
-        this.cancelButton = this.addDrawableChild(ButtonWidget.builder(Chat.tr("stock.cancel"),
+        this.speedSlider = this.addSelectableChild(ConfigSlider.speed(this.panelX + PADDING, buttonY - 24, PANEL_WIDTH - PADDING * 2));
+        this.cancelButton = this.addSelectableChild(ButtonWidget.builder(Chat.tr("stock.cancel"),
                         button -> AgentManager.get().cancelStocking())
                 .dimensions(this.panelX + PADDING, buttonY, PANEL_WIDTH - PADDING * 2, 20).build());
     }
@@ -57,7 +58,13 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float deltaTicks) {
         super.render(context, mouseX, mouseY, deltaTicks);
+        // Own layers so chat text cannot shine through the panel (see AgentLockScreen#render).
+        context.createNewRootLayer();
         this.renderPanel(context);
+        context.createNewRootLayer();
+        if (this.speedSlider != null) {
+            this.speedSlider.render(context, mouseX, mouseY, deltaTicks);
+        }
         if (this.cancelButton != null) {
             this.cancelButton.render(context, mouseX, mouseY, deltaTicks);
         }
@@ -75,7 +82,7 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
         int textX = x + PADDING;
         int line = y + PADDING;
 
-        context.drawTextWithShadow(this.textRenderer, Text.literal("TRUHEN-STOCK").formatted(Formatting.BOLD), textX, line, COLOR_TITLE);
+        context.drawTextWithShadow(this.textRenderer, Chat.tr("stock.title").formatted(Formatting.BOLD), textX, line, COLOR_TITLE);
         line += 14;
 
         if (job == null) {

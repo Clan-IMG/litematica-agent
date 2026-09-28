@@ -115,16 +115,12 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
             }
             context.takeScreenshot("advanced-03-wrong-block");
 
-            context.runOnClient(client -> {
-                AgentManager.get().config().breakWrongBlocks = true;
-                AgentManager.get().resume(floorSession);
-            });
+            context.runOnClient(client -> AgentManager.get().answerApproval(true));
             AgentSession pausedAgain = GameTestSupport.waitForAgent(context, floorSession, 20 * 60 * 3);
             if (pausedAgain != null) {
                 throw new AssertionError("Floor session paused again: " + pausedAgain.pauseReason + " " + pausedAgain.pauseArgs);
             }
             GameTestSupport.assertBuilt(context, floor, "floor");
-            context.runOnClient(client -> AgentManager.get().config().breakWrongBlocks = false);
         }
     }
 
@@ -138,7 +134,7 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
                 new BlockHitResult(Vec3d.ofCenter(CHEST).add(0.0, 0.5, 0.0), Direction.UP, CHEST, false)));
         context.waitForScreen(GenericContainerScreen.class);
         context.waitTicks(5);
-        context.clickScreenButton("litematica_agent.scan.all");
+        GameTestSupport.clickButton(context, "scan.all");
         context.waitTicks(10);
         context.runOnClient(client -> client.player.closeHandledScreen());
         context.waitTicks(5);

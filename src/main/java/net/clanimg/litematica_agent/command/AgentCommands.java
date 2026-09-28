@@ -10,16 +10,23 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.clanimg.litematica_agent.agent.AgentManager;
 import net.clanimg.litematica_agent.agent.AgentSession;
+import net.clanimg.litematica_agent.agent.SessionRuntime;
 import net.clanimg.litematica_agent.agent.SessionState;
 import net.clanimg.litematica_agent.config.AgentConfig;
+import net.clanimg.litematica_agent.gui.AgentSettingsScreen;
+import net.clanimg.litematica_agent.gui.BlockQueueScreen;
 import net.clanimg.litematica_agent.persistence.WorldData;
 import net.clanimg.litematica_agent.ui.Chat;
+import net.clanimg.litematica_agent.ui.Messages;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
 
-import java.util.function.Consumer;
+import java.util.Locale;
+import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
@@ -31,6 +38,16 @@ public final class AgentCommands {
     private static final SuggestionProvider<FabricClientCommandSource> SESSION_IDS = (context, builder) -> {
         for (AgentSession session : AgentManager.get().sessions()) {
             builder.suggest(session.id, Text.literal(session.name()));
+        }
+        return builder.buildFuture();
+    };
+    private static final SuggestionProvider<FabricClientCommandSource> LANGUAGES = (context, builder) -> {
+        Messages.availableLanguages().forEach(builder::suggest);
+        return builder.buildFuture();
+    };
+    private static final SuggestionProvider<FabricClientCommandSource> WRONG_BLOCK_MODES = (context, builder) -> {
+        for (AgentConfig.WrongBlockMode mode : AgentConfig.WrongBlockMode.values()) {
+            builder.suggest(mode.id());
         }
         return builder.buildFuture();
     };
@@ -50,6 +67,13 @@ public final class AgentCommands {
                 .then(literal("begin")
                         .then(argument("id", IntegerArgumentType.integer(1)).suggests(SESSION_IDS)
                                 .executes(context -> run(() -> manager.begin(id(context))))))
+                .then(literal("accept")
+                        .then(argument("id", IntegerArgumentType.integer(1)).suggests(SESSION_IDS)
+                                .executes(context -> run(() -> manager.acceptSkips(id(context))))))
+                .then(literal("language")
+                        .executes(context -> languageInfo())
+                        .then(argument("language", StringArgumentType.word()).suggests(LANGUAGES)
+                                .executes(context -> setLanguage(StringArgumentType.getString(context, "language")))))
                 .then(literal("stop")
                         .executes(context -> run(() -> manager.stop(null)))
                         .then(argument("id", IntegerArgumentType.integer(1)).suggests(SESSION_IDS)
@@ -62,6 +86,15 @@ public final class AgentCommands {
                 .then(literal("status").executes(context -> status()))
                 .then(literal("deposit").executes(context -> run(manager::deposit)))
                 .then(literal("stock").executes(context -> run(manager::startStocking)))
+                .then(literal("settings").executes(context -> openScreen(() -> new AgentSettingsScreen(null))))
+                .then(literal("blocks").executes(context -> {
+                    SessionRuntime runtime = manager.focused();
+                    if (runtime == null) {
+                        Chat.error(Chat.tr("error.no_session"));
+                        return 0;
+                    }
+                    return openScreen(() -> new BlockQueueScreen(null, runtime));
+                }))
                 .then(storage(manager))
                 .then(home(manager))
                 .then(config(manager)));
@@ -102,11 +135,12 @@ public final class AgentCommands {
     private static LiteralArgumentBuilder<FabricClientCommandSource> config(AgentManager manager) {
         return literal("config")
                 .executes(context -> configInfo())
-                .then(intOption("placeDelayTicks", 1, 40, (config, value) -> config.placeDelayTicks = value))
-                .then(intOption("containerClickDelayTicks", 1, 20, (config, value) -> config.containerClickDelayTicks = value))
-                .then(floatOption("rotationSpeed", 5.0F, 180.0F, (config, value) -> config.rotationSpeed = value))
+                .then(intOption("speed", AgentConfig.FASTEST_SPEED, AgentConfig.SLOWEST_SPEED, (config, value) -> config.speed = value))
+                .then(intOption("agentFps", AgentConfig.MIN_AGENT_FPS, AgentConfig.MAX_AGENT_FPS, (config, value) -> config.agentFps = value))
+                .then(boolOption("autoTool", (config, value) -> config.autoTool = value))
                 .then(boolOption("sprint", (config, value) -> config.sprint = value))
-                .then(boolOption("breakWrongBlocks", (config, value) -> config.breakWrongBlocks = value))
+                .then(literal("wrongBlocks").then(argument("mode", StringArgumentType.word()).suggests(WRONG_BLOCK_MODES)
+                        .executes(context -> setWrongBlockMode(StringArgumentType.getString(context, "mode")))))
                 .then(boolOption("useHelperBlocks", (config, value) -> config.useHelperBlocks = value))
                 .then(boolOption("allowLookTricks", (config, value) -> config.allowLookTricks = value))
                 .then(intOption("toolDurabilityReserve", 1, 200, (config, value) -> config.toolDurabilityReserve = value))
@@ -145,14 +179,53 @@ public final class AgentCommands {
         }));
     }
 
+    private static int setWrongBlockMode(String value) {
+        AgentConfig.WrongBlockMode mode = AgentConfig.WrongBlockMode.byId(value);
+        if (mode == null) {
+            Chat.error(Chat.tr("config.invalid", value));
+            return 0;
+        }
+        AgentManager.get().config().wrongBlockMode = mode;
+        return configChanged("wrongBlocks", mode.id());
+    }
+
     private static int configChanged(String name, String value) {
         AgentManager.get().saveConfig();
         Chat.success(Chat.tr("config.changed", name, value));
         return 1;
     }
 
+    private static int languageInfo() {
+        Chat.info(Chat.tr("language.current", AgentManager.get().config().language,
+                String.join(", ", Messages.availableLanguages())));
+        return 1;
+    }
+
+    private static int setLanguage(String value) {
+        String language = value.toLowerCase(Locale.ROOT);
+        if (!Messages.availableLanguages().contains(language)) {
+            Chat.error(Chat.tr("language.unknown", value, String.join(", ", Messages.availableLanguages())));
+            return 0;
+        }
+        AgentManager manager = AgentManager.get();
+        manager.config().language = language;
+        manager.saveConfig();
+        Messages.load(language);
+        Chat.success(Chat.tr("language.changed", language));
+        return 1;
+    }
+
     private static int id(CommandContext<FabricClientCommandSource> context) {
         return IntegerArgumentType.getInteger(context, "id");
+    }
+
+    /**
+     * The chat screen closes right after a command runs, so the new screen is opened one step later.
+     */
+    private static int openScreen(Supplier<Screen> factory) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        client.send(() -> client.setScreen(factory.get()));
+        return 1;
     }
 
     private static int run(Runnable action) {
@@ -165,8 +238,9 @@ public final class AgentCommands {
 
     private static int help() {
         Chat.info(Chat.tr("help.title"));
-        for (String key : new String[]{"start", "start_id", "stop", "cancel", "list", "status", "storage", "home", "config", "deposit", "stock"}) {
-            Chat.send(Text.literal("  ").append(Chat.tr("help." + key).formatted(Formatting.GRAY)));
+        for (String key : new String[]{"start", "start_id", "stop", "cancel", "list", "status", "storage", "home", "config",
+                "settings", "blocks", "deposit", "stock", "language"}) {
+            Chat.send(Chat.tr("help." + key));
         }
         return 1;
     }
@@ -180,28 +254,21 @@ public final class AgentCommands {
         Chat.info(Chat.tr("list.title"));
         for (AgentSession session : manager.sessions()) {
             double percent = session.totalBlocks == 0 ? 0.0 : session.doneBlocks * 100.0 / session.totalBlocks;
-            MutableText line = Text.literal(" #" + session.id + " ").formatted(Formatting.AQUA)
-                    .append(Text.literal(session.name() + " ").formatted(Formatting.WHITE))
-                    .append(Chat.tr("state." + session.state.name().toLowerCase()).formatted(stateColor(session.state)))
-                    .append(Text.literal(String.format(" %.1f%% ", percent)).formatted(Formatting.GRAY));
+            MutableText line = Chat.tr("list.line", session.id, session.name(), stateName(session.state),
+                    String.format("%.1f", percent));
             if (session.state != SessionState.BUILDING) {
-                line.append(Chat.button(Chat.tr("button.resume"), "/agent start " + session.id, Formatting.GREEN, Chat.tr("hover.resume")));
+                line.append(Chat.button(Chat.tr("button.resume"), "/agent start " + session.id, Chat.tr("hover.resume")));
             } else {
-                line.append(Chat.button(Chat.tr("button.pause"), "/agent stop " + session.id, Formatting.GOLD, Chat.tr("hover.pause")));
+                line.append(Chat.button(Chat.tr("button.pause"), "/agent stop " + session.id, Chat.tr("hover.pause")));
             }
-            line.append(" ").append(Chat.button(Chat.tr("button.cancel"), "/agent cancel " + session.id, Formatting.RED, Chat.tr("hover.cancel")));
+            line.append(" ").append(Chat.button(Chat.tr("button.cancel"), "/agent cancel " + session.id, Chat.tr("hover.cancel")));
             Chat.send(line);
         }
         return 1;
     }
 
-    private static Formatting stateColor(SessionState state) {
-        return switch (state) {
-            case BUILDING -> Formatting.GREEN;
-            case PAUSED -> Formatting.GOLD;
-            case READY -> Formatting.AQUA;
-            default -> Formatting.YELLOW;
-        };
+    private static Text stateName(SessionState state) {
+        return Chat.tr("state." + state.name().toLowerCase(Locale.ROOT));
     }
 
     private static int status() {
@@ -211,10 +278,10 @@ public final class AgentCommands {
             Chat.info(Chat.tr("status.none"));
             return 1;
         }
-        Chat.info(Chat.tr("status.line", session.id, session.name(), Chat.tr("state." + session.state.name().toLowerCase()),
+        Chat.info(Chat.tr("status.line", session.id, session.name(), stateName(session.state),
                 session.doneBlocks, session.totalBlocks));
         if (session.state == SessionState.PAUSED && !session.pauseReason.isEmpty()) {
-            Chat.info(Chat.trList(session.pauseReason, session.pauseArgs));
+            Chat.info(Chat.tr("status.reason", Chat.trList(session.pauseReason, session.pauseArgs)));
         }
         return 1;
     }
@@ -252,24 +319,24 @@ public final class AgentCommands {
 
     private static int configInfo() {
         AgentConfig config = AgentManager.get().config();
-        Consumer<String> line = text -> Chat.send(Text.literal("  " + text).formatted(Formatting.GRAY));
+        BiConsumer<String, Object> line = (name, value) -> Chat.send(Chat.tr("config.line", name, value));
         Chat.info(Chat.tr("config.title"));
-        line.accept("placeDelayTicks = " + config.placeDelayTicks);
-        line.accept("containerClickDelayTicks = " + config.containerClickDelayTicks);
-        line.accept("rotationSpeed = " + config.rotationSpeed);
-        line.accept("sprint = " + config.sprint);
-        line.accept("breakWrongBlocks = " + config.breakWrongBlocks);
-        line.accept("useHelperBlocks = " + config.useHelperBlocks);
-        line.accept("allowLookTricks = " + config.allowLookTricks);
-        line.accept("toolDurabilityReserve = " + config.toolDurabilityReserve);
-        line.accept("eatAtFoodLevel = " + config.eatAtFoodLevel);
-        line.accept("pauseAtHealth = " + config.pauseAtHealth);
-        line.accept("emergencyHealth = " + config.emergencyHealth);
-        line.accept("emergencyDisconnect = " + config.emergencyDisconnect);
-        line.accept("homeDistance = " + config.homeDistance);
-        line.accept("maxStartDistance = " + config.maxStartDistance);
-        line.accept("showMaterialHud = " + config.showMaterialHud);
-        line.accept("verboseLogging = " + config.verboseLogging);
+        line.accept("speed", config.speed);
+        line.accept("agentFps", config.agentFps);
+        line.accept("autoTool", config.autoTool);
+        line.accept("sprint", config.sprint);
+        line.accept("wrongBlocks", config.wrongBlockMode.id());
+        line.accept("useHelperBlocks", config.useHelperBlocks);
+        line.accept("allowLookTricks", config.allowLookTricks);
+        line.accept("toolDurabilityReserve", config.toolDurabilityReserve);
+        line.accept("eatAtFoodLevel", config.eatAtFoodLevel);
+        line.accept("pauseAtHealth", config.pauseAtHealth);
+        line.accept("emergencyHealth", config.emergencyHealth);
+        line.accept("emergencyDisconnect", config.emergencyDisconnect);
+        line.accept("homeDistance", config.homeDistance);
+        line.accept("maxStartDistance", config.maxStartDistance);
+        line.accept("showMaterialHud", config.showMaterialHud);
+        line.accept("verboseLogging", config.verboseLogging);
         return 1;
     }
 }

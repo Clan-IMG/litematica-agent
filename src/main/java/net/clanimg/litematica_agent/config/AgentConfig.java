@@ -1,21 +1,70 @@
 package net.clanimg.litematica_agent.config;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Global settings, stored in {@code config/litematica_agent/config.json}.
  */
 public final class AgentConfig {
-    /** Ticks between two block placements (20 ticks = 1 second). */
-    public int placeDelayTicks = 3;
-    /** Ticks between two clicks inside a container. */
-    public int containerClickDelayTicks = 3;
-    /** Maximum camera turn per tick in degrees. */
-    public float rotationSpeed = 30.0F;
+    /** What happens with blocks at schematic positions that the agent did not place itself. */
+    public enum WrongBlockMode {
+        /** Pause and let the player approve or reject breaking the block. */
+        ASK,
+        /** Break it without asking. */
+        ALLOW,
+        /** Leave it in place and skip the schematic block at that position. */
+        SKIP;
+
+        public String id() {
+            return this.name().toLowerCase(Locale.ROOT);
+        }
+
+        public static @Nullable WrongBlockMode byId(String id) {
+            for (WrongBlockMode mode : values()) {
+                if (mode.id().equalsIgnoreCase(id)) {
+                    return mode;
+                }
+            }
+            return null;
+        }
+    }
+
+    /** What the item row of the lock screen shows. */
+    public enum MaterialView {
+        /** Still needed for the current layer, or for the queued block types. */
+        CURRENT,
+        /** Still needed for the whole schematic. */
+        TOTAL,
+        INVENTORY
+    }
+
+    public static final int FASTEST_SPEED = 1;
+    public static final int DEFAULT_SPEED = 10;
+    public static final int SLOWEST_SPEED = 40;
+    public static final int MIN_AGENT_FPS = 20;
+    public static final int MAX_AGENT_FPS = 120;
+
+    /** Language of all texts: {@code config/litematica_agent/message_<language>.yml}. */
+    public String language = "en";
+    /**
+     * Working pace like the Litematica printer delay: 1 is the fastest pace that still works reliably, 40 is very
+     * slow. Place delay, container click delay and camera speed are derived from it.
+     */
+    public int speed = DEFAULT_SPEED;
+    /**
+     * How often per second the agent turns the camera, like mouse input every frame (at most the real frame rate).
+     * 20 turns it once per game tick.
+     */
+    public int agentFps = 60;
+    public MaterialView materialView = MaterialView.CURRENT;
+    /** When the player starts mining, switch to the best tool from hotbar or inventory, sparing nearly broken ones. */
+    public boolean autoTool = true;
     public boolean sprint = true;
-    /** Break blocks at schematic positions that the agent did not place itself. */
-    public boolean breakWrongBlocks = false;
+    public WrongBlockMode wrongBlockMode = WrongBlockMode.ASK;
     /** Use cheap blocks to pillar up and to support floating blocks; they are removed afterwards. */
     public boolean useHelperBlocks = true;
     public List<String> helperBlocks = new ArrayList<>(List.of(
@@ -44,9 +93,11 @@ public final class AgentConfig {
     public boolean verboseLogging = false;
 
     public void sanitize() {
-        this.placeDelayTicks = clamp(this.placeDelayTicks, 1, 40);
-        this.containerClickDelayTicks = clamp(this.containerClickDelayTicks, 1, 20);
-        this.rotationSpeed = Math.max(5.0F, Math.min(180.0F, this.rotationSpeed));
+        this.speed = clamp(this.speed, FASTEST_SPEED, SLOWEST_SPEED);
+        this.agentFps = clamp(this.agentFps, MIN_AGENT_FPS, MAX_AGENT_FPS);
+        if (this.materialView == null) {
+            this.materialView = MaterialView.CURRENT;
+        }
         this.toolDurabilityReserve = clamp(this.toolDurabilityReserve, 1, 200);
         this.eatAtFoodLevel = clamp(this.eatAtFoodLevel, 1, 19);
         this.homeDistance = clamp(this.homeDistance, 16, 100_000);
@@ -54,6 +105,52 @@ public final class AgentConfig {
         if (this.helperBlocks == null) {
             this.helperBlocks = new ArrayList<>();
         }
+        if (this.wrongBlockMode == null) {
+            this.wrongBlockMode = WrongBlockMode.ASK;
+        }
+        if (this.language == null || this.language.isBlank()) {
+            this.language = "en";
+        }
+        this.language = this.language.toLowerCase(Locale.ROOT);
+    }
+
+    /** Ticks between two block placements (20 ticks = 1 second). */
+    public int placeDelayTicks() {
+        return (int) Math.round(this.bySpeed(1, 3, 20));
+    }
+
+    /** Ticks between two clicks inside a container. */
+    public int containerClickDelayTicks() {
+        return (int) Math.round(this.bySpeed(1, 3, 12));
+    }
+
+    /**
+     * Maximum camera turn per tick in degrees. The slowest value still turns 180 degrees well within the aim timeouts.
+     */
+    public float rotationSpeed() {
+        return (float) this.bySpeed(180, 30, 12);
+    }
+
+    /**
+     * Share of the remaining turn that is still left after one tick close to the target: the camera slows down on the
+     * last degrees like a hand on a mouse. Small values settle within a tick.
+     */
+    public double rotationSettle() {
+        return this.bySpeed(0.05, 0.4, 0.4);
+    }
+
+    /** Smallest turn per tick in degrees, so the last degrees do not crawl. */
+    public float rotationMinStep() {
+        return (float) this.bySpeed(6, 1.5, 1.5);
+    }
+
+    /** Linear between the fastest and the default value, and between the default and the slowest value. */
+    private double bySpeed(double fastest, double normal, double slowest) {
+        int level = clamp(this.speed, FASTEST_SPEED, SLOWEST_SPEED);
+        if (level <= DEFAULT_SPEED) {
+            return fastest + (normal - fastest) * (level - FASTEST_SPEED) / (DEFAULT_SPEED - FASTEST_SPEED);
+        }
+        return normal + (slowest - normal) * (level - DEFAULT_SPEED) / (SLOWEST_SPEED - DEFAULT_SPEED);
     }
 
     private static int clamp(int value, int min, int max) {

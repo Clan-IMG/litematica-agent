@@ -1,8 +1,10 @@
 package net.clanimg.litematica_agent.placement;
 
+import net.minecraft.block.AbstractCandleBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.CampfireBlock;
 import net.minecraft.block.DaylightDetectorBlock;
 import net.minecraft.block.DoorBlock;
 import net.minecraft.block.FenceGateBlock;
@@ -10,10 +12,15 @@ import net.minecraft.block.LeverBlock;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.state.property.IntProperty;
 import net.minecraft.state.property.Properties;
 import net.minecraft.state.property.Property;
 import net.minecraft.util.math.Direction;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Set;
 
@@ -80,10 +87,101 @@ public final class StateMatcher {
     }
 
     /**
-     * The block and its placement properties already match; only right-click adjustments are missing.
+     * Only right-clicks are missing: adjustments of a matching block (repeater delay, lighting a candle, ...) or the
+     * tool conversion of a placed base block (dirt to farmland or dirt path).
      */
     public static boolean needsInteraction(BlockState world, BlockState target) {
+        if (isConversionBase(world, target)) {
+            return true;
+        }
         return placementMatches(world, target, false) && countsEqual(world, target) && !interactionsMatch(world, target);
+    }
+
+    /** Items the agent right-clicks with to change a block after placing it. */
+    public enum Tool {
+        FLINT_AND_STEEL(Items.FLINT_AND_STEEL),
+        SHOVEL(Items.IRON_SHOVEL),
+        HOE(Items.IRON_HOE);
+
+        private final Item creativeItem;
+
+        Tool(Item creativeItem) {
+            this.creativeItem = creativeItem;
+        }
+
+        /** The item taken from the creative inventory; in survival any matching item is used. */
+        public Item creativeItem() {
+            return this.creativeItem;
+        }
+
+        public boolean matches(ItemStack stack) {
+            return switch (this) {
+                case FLINT_AND_STEEL -> stack.isOf(Items.FLINT_AND_STEEL) || stack.isOf(Items.FIRE_CHARGE);
+                case SHOVEL -> stack.isIn(ItemTags.SHOVELS);
+                case HOE -> stack.isIn(ItemTags.HOES);
+            };
+        }
+    }
+
+    /**
+     * What the next right-click from {@code world} towards {@code target} has to be done with; null means an empty
+     * hand. Only meaningful while {@link #needsInteraction} is true.
+     */
+    public static @Nullable Tool toolFor(BlockState world, BlockState target) {
+        if (target.isOf(Blocks.FARMLAND) && !world.isOf(Blocks.FARMLAND)) {
+            return Tool.HOE;
+        }
+        if (target.isOf(Blocks.DIRT_PATH) && !world.isOf(Blocks.DIRT_PATH)) {
+            return Tool.SHOVEL;
+        }
+        if (target.contains(Properties.LIT) && world.contains(Properties.LIT) && world.get(Properties.LIT) != target.get(Properties.LIT)) {
+            if (target.get(Properties.LIT)) {
+                return Tool.FLINT_AND_STEEL;
+            }
+            // Candles go out with an empty hand, campfires need a shovel.
+            return world.getBlock() instanceof CampfireBlock ? Tool.SHOVEL : null;
+        }
+        return null;
+    }
+
+    /** The tool a target needs when it is built from scratch, or null if placing it is enough. */
+    public static @Nullable Tool toolNeeded(BlockState target) {
+        if (target.isOf(Blocks.FARMLAND)) {
+            return Tool.HOE;
+        }
+        if (target.isOf(Blocks.DIRT_PATH)) {
+            return Tool.SHOVEL;
+        }
+        if (target.getBlock() instanceof AbstractCandleBlock && target.get(Properties.LIT)) {
+            return Tool.FLINT_AND_STEEL;
+        }
+        if (target.getBlock() instanceof CampfireBlock && !target.get(Properties.LIT)) {
+            return Tool.SHOVEL;
+        }
+        return null;
+    }
+
+    /**
+     * The state that is actually placed: farmland and dirt paths cannot be placed, they start as dirt and are
+     * converted with a hoe or a shovel.
+     */
+    public static BlockState placementState(BlockState target) {
+        if (target.isOf(Blocks.FARMLAND) || target.isOf(Blocks.DIRT_PATH)) {
+            return Blocks.DIRT.getDefaultState();
+        }
+        return target;
+    }
+
+    private static boolean isConversionBase(BlockState world, BlockState target) {
+        if (target.isOf(Blocks.FARMLAND)) {
+            return world.isOf(Blocks.DIRT) || world.isOf(Blocks.GRASS_BLOCK) || world.isOf(Blocks.DIRT_PATH)
+                    || world.isOf(Blocks.COARSE_DIRT);
+        }
+        if (target.isOf(Blocks.DIRT_PATH)) {
+            return world.isOf(Blocks.DIRT) || world.isOf(Blocks.GRASS_BLOCK) || world.isOf(Blocks.PODZOL)
+                    || world.isOf(Blocks.MYCELIUM) || world.isOf(Blocks.COARSE_DIRT) || world.isOf(Blocks.ROOTED_DIRT);
+        }
+        return false;
     }
 
     /**
@@ -188,6 +286,9 @@ public final class StateMatcher {
                 || block instanceof TrapdoorBlock && !state.isOf(Blocks.IRON_TRAPDOOR)
                 || block instanceof FenceGateBlock) {
             return Set.of(Properties.OPEN);
+        }
+        if (block instanceof AbstractCandleBlock || block instanceof CampfireBlock) {
+            return Set.of(Properties.LIT);
         }
         return Set.of();
     }

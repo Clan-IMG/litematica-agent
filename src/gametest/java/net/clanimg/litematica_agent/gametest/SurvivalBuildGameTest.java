@@ -73,7 +73,7 @@ public class SurvivalBuildGameTest implements FabricClientGameTest {
                 });
                 context.waitForScreen(GenericContainerScreen.class);
                 context.waitTicks(5);
-                context.clickScreenButton("litematica_agent.scan.all");
+                GameTestSupport.clickButton(context, "scan.all");
                 context.waitTicks(30);
                 if (chest.getX() == 0) {
                     context.takeScreenshot("survival-02-chest-scanned");

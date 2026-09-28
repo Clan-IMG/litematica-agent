@@ -1,6 +1,9 @@
 package net.clanimg.litematica_agent.storage;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -11,7 +14,10 @@ public final class ContainerRecord {
     public int x;
     public int y;
     public int z;
+    /** Contents of the slots the agent may use. */
     public Map<String, Integer> items = new LinkedHashMap<>();
+    /** Indices of the container slots the agent may use; null means all of them (records of older versions). */
+    public @Nullable List<Integer> slots;
     public long scannedAt;
 
     public ContainerRecord() {
@@ -30,6 +36,10 @@ public final class ContainerRecord {
 
     public static String key(String dimension, int x, int y, int z) {
         return dimension + "|" + x + "|" + y + "|" + z;
+    }
+
+    public boolean allows(int slotIndex) {
+        return this.slots == null || this.slots.contains(slotIndex);
     }
 
     public int count(String itemId) {

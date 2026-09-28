@@ -21,6 +21,11 @@ public final class AgentSession {
     public int placedBlocks;
     public int totalBlocks;
     public int doneBlocks;
+    public BuildStrategy strategy = BuildStrategy.LAYERS;
+    /** Item ids built one after another with {@link BuildStrategy#BLOCKS}. */
+    public List<String> blockQueue = new ArrayList<>();
+    /** Helper blocks the agent placed and still has to remove (packed positions), kept across restarts. */
+    public List<Long> helperBlocks = new ArrayList<>();
 
     public AgentSession() {
     }

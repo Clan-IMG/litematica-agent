@@ -13,6 +13,7 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -33,6 +34,10 @@ public final class PlaceTask implements AgentTask {
     private static final int VERIFY_TIMEOUT = 12;
     private static final int MAX_REAIMS = 3;
     private static final int SETTLE_TICKS = 8;
+    /** Upper bound for phases passed through in one tick; a retry loop can never spin. */
+    private static final int MAX_PHASES_PER_TICK = 6;
+    /** The eye moved farther than this (squared) since the click was planned: plan it again. */
+    private static final double EYE_MOVED_SQ = 0.02 * 0.02;
 
     private final int index;
     private final BuildTarget target;
@@ -42,6 +47,8 @@ public final class PlaceTask implements AgentTask {
     private int timer;
     private int reaims;
     private @Nullable PlacementSolver.Option option;
+    /** Where the eye was when {@link #option} was planned. */
+    private @Nullable Vec3d optionEye;
     private @Nullable BlockState before;
     private String failure = "";
     private boolean missingItem;
@@ -61,18 +68,30 @@ public final class PlaceTask implements AgentTask {
         return this.missingItem;
     }
 
+    /**
+     * Phases that need no time in the world follow each other within the same tick: selecting the item, turning,
+     * clicking and checking the client's own placement. Only walking, sneaking, turning the camera and the place
+     * delay take ticks, so a block costs as little time as a player's click would.
+     */
     @Override
     public Result tick(BuildAgent agent) {
         ClientPlayerEntity player = agent.player();
         this.timer++;
-        return switch (this.phase) {
-            case MOVE -> this.tickMove(agent, player);
-            case PREPARE -> this.tickPrepare(agent, player);
-            case SNEAK -> this.tickSneak(agent, player);
-            case AIM -> this.tickAim(agent, player);
-            case CLICK -> this.tickClick(agent, player);
-            case VERIFY -> this.tickVerify(agent);
-        };
+        for (int step = 0; step < MAX_PHASES_PER_TICK; step++) {
+            Phase current = this.phase;
+            Result result = switch (current) {
+                case MOVE -> this.tickMove(agent, player);
+                case PREPARE -> this.tickPrepare(agent, player);
+                case SNEAK -> this.tickSneak(agent, player);
+                case AIM -> this.tickAim(agent, player);
+                case CLICK -> this.tickClick(agent, player);
+                case VERIFY -> this.tickVerify(agent);
+            };
+            if (result != Result.RUNNING || this.phase == current) {
+                return result;
+            }
+        }
+        return Result.RUNNING;
     }
 
     private Result tickMove(BuildAgent agent, ClientPlayerEntity player) {
@@ -82,7 +101,8 @@ public final class PlaceTask implements AgentTask {
                 return this.fail("path_not_found");
             }
         }
-        if (this.timer % 5 == 0 && agent.isStable() && !agent.isPlayerInTheWay(this.target)
+        // Stop as soon as the block can be placed from where the player is, not only at the planned spot.
+        if (agent.isStable() && !agent.isPlayerInTheWay(this.target)
                 && agent.solver().findFromEye(player, this.target, player.getEyePos(), agent.reach()) != null) {
             agent.movement().stop();
             return this.next(Phase.PREPARE);
@@ -112,19 +132,21 @@ public final class PlaceTask implements AgentTask {
             this.missingItem = true;
             return this.fail("missing_item");
         }
-        this.option = agent.solver().findFromEye(player, this.target, player.getEyePos(), agent.reach());
+        this.plan(agent, player);
         if (this.option == null) {
             // Right after walking the player may still slide a little; give it a moment before giving up.
             return this.timer < SETTLE_TICKS ? Result.RUNNING : this.fail("no_placement_option");
         }
         agent.setHeldSneak(this.option.sneak());
+        // Start turning right away; the camera moves every frame until the next tick.
+        agent.rotation().setTarget(this.option.yaw(), this.option.pitch());
         return this.next(this.option.sneak() && !player.isInSneakingPose() && !player.getAbilities().flying ? Phase.SNEAK : Phase.AIM);
     }
 
     private Result tickSneak(BuildAgent agent, ClientPlayerEntity player) {
         agent.setHeldSneak(true);
         if (player.isInSneakingPose() || this.timer > 10) {
-            this.option = agent.solver().findFromEye(player, this.target, player.getEyePos(), agent.reach());
+            this.plan(agent, player);
             if (this.option == null) {
                 return this.fail("no_placement_option");
             }
@@ -134,15 +156,31 @@ public final class PlaceTask implements AgentTask {
     }
 
     private Result tickAim(BuildAgent agent, ClientPlayerEntity player) {
+        if (this.optionEye != null && player.getEyePos().squaredDistanceTo(this.optionEye) > EYE_MOVED_SQ) {
+            // The player still slides after walking: the planned view direction no longer fits, plan it again.
+            return this.next(Phase.PREPARE);
+        }
         agent.setHeldSneak(this.option.sneak());
         agent.rotation().setTarget(this.option.yaw(), this.option.pitch());
-        if (agent.rotation().isAligned(player, 0.4F)) {
+        // Like a player, click as soon as the crosshair is on a spot that gives exactly the right block; the camera
+        // does not have to rest on the planned point. Look tricks need the planned view direction itself.
+        boolean aligned = agent.rotation().isAligned(player, 0.4F);
+        if (this.option.lookTrick() ? aligned : this.validHit(agent, player) != null) {
             return this.next(Phase.CLICK);
+        }
+        if (aligned) {
+            // Looking exactly at the planned point and still no fitting hit: something changed, plan again.
+            return this.retry(Phase.PREPARE);
         }
         if (this.timer > AIM_TIMEOUT) {
             return this.fail("aim_timeout");
         }
         return Result.RUNNING;
+    }
+
+    private void plan(BuildAgent agent, ClientPlayerEntity player) {
+        this.optionEye = player.getEyePos();
+        this.option = agent.solver().findFromEye(player, this.target, this.optionEye, agent.reach());
     }
 
     private Result tickClick(BuildAgent agent, ClientPlayerEntity player) {
@@ -153,10 +191,8 @@ public final class PlaceTask implements AgentTask {
         if (!player.getMainHandStack().isOf(this.target.item())) {
             return this.retry(Phase.PREPARE);
         }
-        // Normally the click goes exactly where the crosshair points. For look tricks the camera deliberately looks
-        // elsewhere, so the planned face is clicked instead; the result is still verified with the real rotation.
-        BlockHitResult hit = this.option.lookTrick() ? this.option.hit() : Aiming.crosshair(player, agent.reach() + 0.5);
-        if (hit == null || !agent.solver().check(player, this.target, hit, this.option.sneak())) {
+        BlockHitResult hit = this.validHit(agent, player);
+        if (hit == null) {
             return this.retry(Phase.PREPARE);
         }
         this.before = agent.world().getBlockState(this.target.pos());
@@ -165,6 +201,20 @@ public final class PlaceTask implements AgentTask {
         return this.next(Phase.VERIFY);
     }
 
+    /**
+     * The hit the click would produce right now, if it places exactly the target block. Normally that is where the
+     * crosshair points. For look tricks the camera deliberately looks elsewhere, so the planned face is clicked
+     * instead; the result is still verified with the real rotation.
+     */
+    private @Nullable BlockHitResult validHit(BuildAgent agent, ClientPlayerEntity player) {
+        BlockHitResult hit = this.option.lookTrick() ? this.option.hit() : Aiming.crosshair(player, agent.reach() + 0.5);
+        return hit != null && agent.solver().check(player, this.target, hit, this.option.sneak()) ? hit : null;
+    }
+
+    /**
+     * The client places the block itself right away and the server confirms it; a rejected placement is reverted by
+     * the server and noticed by the agent's continuous rescan.
+     */
     private Result tickVerify(BuildAgent agent) {
         agent.setHeldSneak(this.option != null && this.option.sneak() && this.timer < 3);
         BlockState state = agent.world().getBlockState(this.target.pos());

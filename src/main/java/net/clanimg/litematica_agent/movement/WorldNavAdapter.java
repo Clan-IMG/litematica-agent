@@ -86,6 +86,9 @@ public final class WorldNavAdapter implements NavWorld {
                 flags |= SOLID_TOP;
             }
         }
+        if ((flags & PASSABLE) != 0 && !state.isAir() && !state.isReplaceable()) {
+            flags |= OCCUPIED;
+        }
         if (this.helperBlocks.test(this.mutable.asLong())) {
             flags |= HELPER;
         }

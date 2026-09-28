@@ -5,41 +5,39 @@ import net.minecraft.text.ClickEvent;
 import net.minecraft.text.HoverEvent;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
 
 import java.util.List;
 
 /**
- * Client-side chat messages: only the local player sees them, nothing is sent to the server.
+ * Client-side chat messages: only the local player sees them, nothing is sent to the server. Colours come from the
+ * message files, so all levels are sent the same way.
  */
 public final class Chat {
-    private static final String PREFIX_KEY = "litematica_agent.";
-
     private Chat() {
     }
 
     public static MutableText tr(String key, Object... args) {
-        return Text.translatable(PREFIX_KEY + key, args);
+        return Messages.text(key, args);
     }
 
     public static MutableText trList(String key, List<String> args) {
-        return Text.translatable(PREFIX_KEY + key, args.toArray());
+        return Messages.text(key, args.toArray());
     }
 
     public static void info(Text message) {
-        send(message.copy().formatted(Formatting.GRAY));
+        send(message);
     }
 
     public static void success(Text message) {
-        send(message.copy().formatted(Formatting.GREEN));
+        send(message);
     }
 
     public static void warn(Text message) {
-        send(message.copy().formatted(Formatting.GOLD));
+        send(message);
     }
 
     public static void error(Text message) {
-        send(message.copy().formatted(Formatting.RED));
+        send(message);
     }
 
     public static void send(Text message) {
@@ -47,21 +45,16 @@ public final class Chat {
         if (client.inGameHud == null) {
             return;
         }
-        MutableText prefix = Text.literal("[").formatted(Formatting.DARK_GRAY)
-                .append(Text.literal("Agent").formatted(Formatting.AQUA, Formatting.BOLD))
-                .append(Text.literal("] ").formatted(Formatting.DARK_GRAY));
-        client.inGameHud.getChatHud().addMessage(prefix.append(message));
+        client.inGameHud.getChatHud().addMessage(Messages.text("format.prefix").append(message));
     }
 
     /**
-     * A clickable {@code [label]} that runs a client command.
+     * A clickable button (format {@code format.button}) that runs a client command.
      */
-    public static MutableText button(Text label, String command, Formatting color, Text hover) {
-        return Text.literal("[").append(label).append("]")
-                .formatted(color, Formatting.BOLD)
-                .styled(style -> style
-                        .withClickEvent(new ClickEvent.RunCommand(command))
-                        .withHoverEvent(new HoverEvent.ShowText(hover)));
+    public static MutableText button(Text label, String command, Text hover) {
+        return Messages.text("format.button", label).styled(style -> style
+                .withClickEvent(new ClickEvent.RunCommand(command))
+                .withHoverEvent(new HoverEvent.ShowText(hover)));
     }
 
     public static String formatDuration(long millis) {

@@ -9,6 +9,7 @@ import java.util.function.LongPredicate;
  * @param maxNodes        search budget
  * @param noFlyColumn     columns (packed with {@link PosUtil#packColumn}) where flight is known to be unavailable
  * @param forbidden       feet positions (packed with {@link PosUtil#pack}) the path must not use
+ * @param noPillar        positions (packed with {@link PosUtil#pack}) where pillaring up already failed
  */
 public record PathOptions(
         boolean canFly,
@@ -16,31 +17,36 @@ public record PathOptions(
         int helperBlocks,
         int maxNodes,
         LongPredicate noFlyColumn,
-        LongPredicate forbidden
+        LongPredicate forbidden,
+        LongPredicate noPillar
 ) {
     public static final LongPredicate NONE = value -> false;
 
     public static PathOptions walking() {
-        return new PathOptions(false, 3, 0, 40_000, NONE, NONE);
+        return new PathOptions(false, 3, 0, 40_000, NONE, NONE, NONE);
     }
 
     public static PathOptions flying() {
-        return new PathOptions(true, 3, 0, 40_000, NONE, NONE);
+        return new PathOptions(true, 3, 0, 40_000, NONE, NONE, NONE);
     }
 
     public PathOptions withHelperBlocks(int count) {
-        return new PathOptions(this.canFly, this.maxFall, count, this.maxNodes, this.noFlyColumn, this.forbidden);
+        return new PathOptions(this.canFly, this.maxFall, count, this.maxNodes, this.noFlyColumn, this.forbidden, this.noPillar);
     }
 
     public PathOptions withNoFly(LongPredicate predicate) {
-        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, this.maxNodes, predicate, this.forbidden);
+        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, this.maxNodes, predicate, this.forbidden, this.noPillar);
     }
 
     public PathOptions withForbidden(LongPredicate predicate) {
-        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, this.maxNodes, this.noFlyColumn, predicate);
+        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, this.maxNodes, this.noFlyColumn, predicate, this.noPillar);
+    }
+
+    public PathOptions withNoPillar(LongPredicate predicate) {
+        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, this.maxNodes, this.noFlyColumn, this.forbidden, predicate);
     }
 
     public PathOptions withMaxNodes(int nodes) {
-        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, nodes, this.noFlyColumn, this.forbidden);
+        return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, nodes, this.noFlyColumn, this.forbidden, this.noPillar);
     }
 }
