@@ -1,5 +1,6 @@
 package net.clanimg.litematica_agent.movement;
 
+import net.clanimg.litematica_agent.mixin.ClientPlayerEntityAccessor;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -76,6 +77,21 @@ public final class RotationController {
         float pitchStep = this.ease(this.targetPitch - player.getPitch(), this.maxPitchStep, ticks);
         // changeLookDirection takes mouse deltas and multiplies them by 0.15.
         player.changeLookDirection(yawStep / 0.15, pitchStep / 0.15);
+    }
+
+    /** Keeps the camera where it is now, e.g. while waiting until the server knows the view direction. */
+    public void hold(ClientPlayerEntity player) {
+        this.setTarget(player.getYaw(), player.getPitch());
+    }
+
+    /**
+     * Whether the server already knows the current view direction: it went out with the last movement packet and has
+     * not changed since. Anti-cheats such as Grim check a click against the last view direction they received, so a
+     * click right after turning the camera has to wait for the next tick.
+     */
+    public static boolean isKnownToServer(ClientPlayerEntity player) {
+        ClientPlayerEntityAccessor sent = (ClientPlayerEntityAccessor) player;
+        return player.getYaw() == sent.litematicaAgent$getLastSentYaw() && player.getPitch() == sent.litematicaAgent$getLastSentPitch();
     }
 
     public boolean isAligned(ClientPlayerEntity player, float tolerance) {

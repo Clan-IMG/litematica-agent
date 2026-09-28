@@ -27,6 +27,7 @@ public class HomeTravelGameTest implements FabricClientGameTest {
     @Override
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
+        GameTestSupport.resetRotationCheck();
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getClientWorld().waitForChunksRender();
             TestServerContext server = singleplayer.getServer();
@@ -77,6 +78,8 @@ public class HomeTravelGameTest implements FabricClientGameTest {
                 return session != null && session.state == SessionState.READY;
             }, 200);
 
+            // The test opened the chest itself without looking at it; only the agent's clicks count.
+            GameTestSupport.resetRotationCheck();
             context.runOnClient(client -> AgentManager.get().begin(sessionId));
             AgentSession paused = GameTestSupport.waitForAgent(context, sessionId, 20 * 60 * 4);
             context.takeScreenshot("home-01-finished");
@@ -84,6 +87,7 @@ public class HomeTravelGameTest implements FabricClientGameTest {
                 throw new AssertionError("Agent paused: " + paused.pauseReason + " " + paused.pauseArgs);
             }
             GameTestSupport.assertBuilt(context, placement, "home");
+            GameTestSupport.assertNoRotationMismatches("home");
             double distance = context.computeOnClient(client -> client.player.getEntityPos().distanceTo(Vec3d.ofCenter(MIN)));
             if (distance > 16) {
                 throw new AssertionError("The agent should end at the build site, but is " + distance + " blocks away");

@@ -43,6 +43,34 @@ class AStarPathfinderTest {
     }
 
     @Test
+    void doesNotJumpOntoSlabLyingOnABlock() {
+        // A platform of blocks covered with bottom slabs: standing on it is 1.5 blocks up, more than a jump.
+        TestWorld world = new TestWorld(FLOOR).wall(3, -20, 20, 20, FEET, FEET);
+        for (int x = 3; x <= 20; x++) {
+            for (int z = -20; z <= 20; z++) {
+                world.set(x, FEET + 1, z, NavWorld.PASSABLE | NavWorld.SOLID_TOP | NavWorld.RAISED);
+            }
+        }
+        PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(3, FEET + 1, 0),
+                PathOptions.walking().withMaxNodes(5_000));
+
+        assertFalse(result.reachedGoal(), () -> "path: " + result.nodes());
+    }
+
+    @Test
+    void stepsOntoSlabFromTheSameLevelAndJumpsOnFromThere() {
+        // A slab on the ground is a small step; from there the slab on the block is only one block higher.
+        TestWorld world = new TestWorld(FLOOR)
+                .set(2, FEET, 0, NavWorld.PASSABLE | NavWorld.SOLID_TOP | NavWorld.RAISED)
+                .solid(3, FEET, 0)
+                .set(3, FEET + 1, 0, NavWorld.PASSABLE | NavWorld.SOLID_TOP | NavWorld.RAISED);
+        PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(3, FEET + 1, 0), PathOptions.walking());
+
+        assertTrue(result.reachedGoal());
+        assertTrue(result.nodes().contains(new PathNode(2, FEET, 0, MoveType.WALK)));
+    }
+
+    @Test
     void cannotClimbTwoBlockWallWithoutHelpers() {
         TestWorld world = new TestWorld(FLOOR).wall(3, -20, 20, 20, FEET, FEET + 1);
         PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(6, FEET + 2, 0),

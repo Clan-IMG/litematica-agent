@@ -5,6 +5,8 @@ import net.clanimg.litematica_agent.movement.RotationController;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.EntityPose;
 import net.minecraft.item.BlockItem;
@@ -93,7 +95,7 @@ public final class PlacementSolver {
                 for (float pitch : FEASIBILITY_PITCHES) {
                     for (boolean sneak : new boolean[]{false, true}) {
                         BlockState result = this.simulate(player, blockItem, stack, hit, yaw, pitch, sneak, target.pos());
-                        if (result != null && StateMatcher.isValidPlacement(result, target.state())) {
+                        if (result != null && fits(world, result, target)) {
                             return true;
                         }
                     }
@@ -129,13 +131,20 @@ public final class PlacementSolver {
      * Finds a click that works from the given eye position, including line of sight and reach.
      */
     public @Nullable Option findFromEye(ClientPlayerEntity player, BuildTarget target, Vec3d eye, double reach) {
+        return this.findFromEye(player, target, eye, reach, true);
+    }
+
+    /**
+     * @param tricks whether a look trick may be used (and only if they are allowed at all), see {@link #setAllowLookTricks}
+     */
+    public @Nullable Option findFromEye(ClientPlayerEntity player, BuildTarget target, Vec3d eye, double reach, boolean tricks) {
         if (!(target.item() instanceof BlockItem blockItem)) {
             return null;
         }
         World world = player.getEntityWorld();
         ItemStack stack = new ItemStack(target.item());
         Option fallback = null;
-        List<Option> trickCandidates = this.allowLookTricks ? new ArrayList<>() : null;
+        List<Option> trickCandidates = tricks && this.allowLookTricks ? new ArrayList<>() : null;
 
         for (AimPoint aim : this.aimPoints(world, target.pos(), true)) {
             double distance = eye.distanceTo(aim.point());
@@ -154,7 +163,7 @@ public final class PlacementSolver {
 
             for (boolean sneak : mustSneak ? new boolean[]{true} : new boolean[]{false, true}) {
                 BlockState result = this.simulate(player, blockItem, stack, hit, angles[0], angles[1], sneak, target.pos());
-                if (result == null || !StateMatcher.isValidPlacement(result, target.state())) {
+                if (result == null || !fits(world, result, target)) {
                     continue;
                 }
                 Option option = new Option(hit, aim.point(), sneak, angles[0], angles[1], false);
@@ -176,6 +185,19 @@ public final class PlacementSolver {
             return fallback;
         }
         return trickCandidates == null || trickCandidates.isEmpty() ? null : trickCandidates.get(0);
+    }
+
+    /**
+     * Like {@link #findFromEye} from where the player is now. A click that needs sneaking has to work from the lower
+     * eye of a crouching player as well, unless the player hovers in flight, where sneaking does not crouch.
+     */
+    public @Nullable Option findFromPlayer(ClientPlayerEntity player, BuildTarget target, double reach, boolean tricks) {
+        Option option = this.findFromEye(player, target, player.getEyePos(), reach, tricks);
+        if (option == null || !option.sneak() || player.getAbilities().flying || player.isInSneakingPose()) {
+            return option;
+        }
+        Vec3d crouched = player.getEntityPos().add(0.0, player.getEyeHeight(EntityPose.CROUCHING), 0.0);
+        return this.findFromEye(player, target, crouched, reach, tricks) == null ? null : option;
     }
 
     private @Nullable Option findLookTrick(ClientPlayerEntity player, BlockItem item, ItemStack stack, BuildTarget target,
@@ -200,7 +222,7 @@ public final class PlacementSolver {
                 float yaw = step * (360.0F / yawSteps);
                 for (boolean sneak : mustSneak ? new boolean[]{true} : new boolean[]{false, true}) {
                     BlockState result = this.simulate(player, item, stack, hit, yaw, pitch, sneak, target.pos());
-                    if (result != null && StateMatcher.isValidPlacement(result, target.state())) {
+                    if (result != null && fits(player.getEntityWorld(), result, target)) {
                         return new float[]{yaw > 180.0F ? yaw - 360.0F : yaw, pitch, sneak ? 1.0F : 0.0F};
                     }
                 }
@@ -210,26 +232,44 @@ public final class PlacementSolver {
     }
 
     /**
-     * Searches positions around the target from which it can be placed.
+     * Searches positions around the target from which it can be placed. A position that needs a look trick is only
+     * taken when no position works without one: anti-cheats notice a click that does not match the view direction.
      *
      * @param standable accepts feet positions the player can stand (or hover) at
      */
     public @Nullable StandSpot findStandSpot(ClientPlayerEntity player, BuildTarget target, double reach,
                                              boolean flying, Predicate<BlockPos> standable, int maxCandidates) {
+        StandSpot spot = this.findStandSpot(player, target, reach, flying, standable, maxCandidates, false);
+        if (spot == null && this.allowLookTricks) {
+            spot = this.findStandSpot(player, target, reach, flying, standable, maxCandidates, true);
+        }
+        return spot;
+    }
+
+    private @Nullable StandSpot findStandSpot(ClientPlayerEntity player, BuildTarget target, double reach, boolean flying,
+                                              Predicate<BlockPos> standable, int maxCandidates, boolean tricks) {
         World world = player.getEntityWorld();
         float standingEye = player.getEyeHeight(EntityPose.STANDING);
         float sneakingEye = player.getEyeHeight(EntityPose.CROUCHING);
         // The player never stops exactly on the block centre, so plan with some distance to the reach limit.
         double planningReach = reach - StandSpots.ARRIVAL_MARGIN;
+        // The player never stands inside the block's own space, even if its shape is thin (a door, a trapdoor): the
+        // player never stops exactly on the spot and would end up in the way.
         StandSpots.Result<Option> result = StandSpots.search(player, target.pos(), reach, flying, standable,
-                collisionBox(world, target), maxCandidates, feet -> {
-                    Option option = this.findFromEye(player, target, StandSpots.eyeAt(feet, standingEye), planningReach);
-                    if (option != null && option.sneak() && !flying) {
-                        option = this.findFromEye(player, target, StandSpots.eyeAt(feet, sneakingEye), planningReach);
+                new Box(target.pos()), maxCandidates, feet -> {
+                    Option option = this.findFromEye(player, target, StandSpots.eyeAt(feet, standingEye), planningReach, tricks);
+                    // Sneaking crouches and lowers the eye on the ground; only while hovering in flight it does not.
+                    if (option != null && option.sneak() && (!flying || hasGround(world, feet))) {
+                        option = this.findFromEye(player, target, StandSpots.eyeAt(feet, sneakingEye), planningReach, tricks);
                     }
                     return option;
                 });
         return result == null ? null : new StandSpot(result.feet(), result.value());
+    }
+
+    private static boolean hasGround(World world, BlockPos feet) {
+        BlockPos below = feet.down();
+        return !world.getBlockState(below).getCollisionShape(world, below).isEmpty();
     }
 
     /**
@@ -239,9 +279,35 @@ public final class PlacementSolver {
         if (!(target.item() instanceof BlockItem blockItem)) {
             return false;
         }
+        // Without sneaking, a click on a chest, hopper, lever... uses that block instead of placing anything.
+        if (!sneak && Interactables.needsSneak(player.getEntityWorld(), hit.getBlockPos())) {
+            return false;
+        }
         BlockState result = this.simulate(player, blockItem, new ItemStack(target.item()), hit,
                 player.getYaw(), player.getPitch(), sneak, target.pos());
-        return result != null && StateMatcher.isValidPlacement(result, target.state());
+        return result != null && fits(player.getEntityWorld(), result, target);
+    }
+
+    /**
+     * Whether a simulated result is a valid step towards the target. A double-chest half may stay single only while its
+     * partner is still missing; next to a waiting partner it has to join it, or the chest holds only half of what it
+     * should (a sneaking click, e.g. on the chest below, would keep it single).
+     */
+    static boolean fits(World world, BlockState result, BuildTarget target) {
+        BlockState wanted = target.state();
+        if (!StateMatcher.isValidPlacement(result, wanted)) {
+            return false;
+        }
+        if (!wanted.contains(Properties.CHEST_TYPE) || wanted.get(Properties.CHEST_TYPE) == ChestType.SINGLE
+                || !result.contains(Properties.CHEST_TYPE) || result.get(Properties.CHEST_TYPE) != ChestType.SINGLE) {
+            return true;
+        }
+        Direction toPartner = ChestBlock.getFacing(wanted);
+        BlockState partner = world.getBlockState(target.pos().offset(toPartner));
+        boolean partnerWaiting = partner.isOf(wanted.getBlock())
+                && partner.get(Properties.HORIZONTAL_FACING) == wanted.get(Properties.HORIZONTAL_FACING)
+                && (partner.get(Properties.CHEST_TYPE) == ChestType.SINGLE || ChestBlock.getFacing(partner) == toPartner.getOpposite());
+        return !partnerWaiting;
     }
 
     private @Nullable BlockState simulate(ClientPlayerEntity player, BlockItem item, ItemStack stack, BlockHitResult hit,

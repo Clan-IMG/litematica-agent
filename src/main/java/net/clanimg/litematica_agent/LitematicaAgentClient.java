@@ -3,6 +3,7 @@ package net.clanimg.litematica_agent;
 import net.clanimg.litematica_agent.agent.AgentManager;
 import net.clanimg.litematica_agent.command.AgentCommands;
 import net.clanimg.litematica_agent.gui.AgentHud;
+import net.clanimg.litematica_agent.gui.AgentViewHud;
 import net.clanimg.litematica_agent.gui.ChestScanOverlay;
 import net.clanimg.litematica_agent.inventory.AutoTool;
 import net.fabricmc.api.ClientModInitializer;
@@ -36,6 +37,8 @@ public class LitematicaAgentClient implements ClientModInitializer {
 
         AgentHud hud = new AgentHud();
         HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT, Identifier.of(MOD_ID, "hud"), hud::render);
+        AgentViewHud view = new AgentViewHud();
+        HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT, Identifier.of(MOD_ID, "agent_view"), view::render);
 
         ChestScanOverlay.register();
         AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {

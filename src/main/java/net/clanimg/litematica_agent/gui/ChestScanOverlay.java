@@ -2,6 +2,7 @@ package net.clanimg.litematica_agent.gui;
 
 import net.clanimg.litematica_agent.agent.AgentManager;
 import net.clanimg.litematica_agent.agent.BuildAgent;
+import net.clanimg.litematica_agent.agent.StockAgent;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
 import net.clanimg.litematica_agent.mixin.HandledScreenAccessor;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
@@ -11,6 +12,9 @@ import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
 import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
@@ -29,6 +33,7 @@ import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -72,7 +77,8 @@ public final class ChestScanOverlay {
         }
         AgentManager manager = AgentManager.get();
         BuildAgent agent = manager.activeAgent();
-        if (agent != null && agent.isOperatingContainer()) {
+        StockAgent stock = manager.stockAgent();
+        if ((agent != null && agent.isOperatingContainer()) || (stock != null && stock.isOperatingContainer())) {
             installAgentGuard(client, handled);
             return;
         }
@@ -81,7 +87,22 @@ public final class ChestScanOverlay {
         }
         BlockPos pos = lastClickedBlock != null && System.currentTimeMillis() - lastClickTime < CLICK_MEMORY_MILLIS
                 ? lastClickedBlock : null;
-        new Controller(client, handled, pos).install();
+        new Controller(client, handled, pos == null || client.world == null ? null : storagePos(client.world, pos)).install();
+    }
+
+    /**
+     * Both halves of a double chest are one container, so it is recorded under the same half whichever was clicked;
+     * otherwise opening it from the other side would look like an unknown chest and could be recorded twice.
+     */
+    private static BlockPos storagePos(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (state.getBlock() instanceof ChestBlock && state.get(ChestBlock.CHEST_TYPE) != ChestType.SINGLE) {
+            BlockPos other = pos.offset(ChestBlock.getFacing(state));
+            if (other.getX() < pos.getX() || (other.getX() == pos.getX() && other.getZ() < pos.getZ())) {
+                return other;
+            }
+        }
+        return pos;
     }
 
     private static boolean isStorageScreen(Screen screen) {

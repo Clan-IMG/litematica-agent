@@ -85,7 +85,9 @@ public final class AgentCommands {
                 .then(literal("list").executes(context -> list()))
                 .then(literal("status").executes(context -> status()))
                 .then(literal("deposit").executes(context -> run(manager::deposit)))
-                .then(literal("stock").executes(context -> run(manager::startStocking)))
+                .then(literal("stock").executes(context -> run(manager::startStocking))
+                        .then(literal("resume").executes(context -> run(manager::resumeStocking)))
+                        .then(literal("cancel").executes(context -> run(manager::cancelStocking))))
                 .then(literal("settings").executes(context -> openScreen(() -> new AgentSettingsScreen(null))))
                 .then(literal("blocks").executes(context -> {
                     SessionRuntime runtime = manager.focused();

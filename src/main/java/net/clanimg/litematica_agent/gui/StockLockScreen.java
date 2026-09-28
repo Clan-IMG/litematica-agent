@@ -6,18 +6,24 @@ import net.clanimg.litematica_agent.ui.Chat;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.input.KeyInput;
+import net.minecraft.text.OrderedText;
+import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
-import org.jetbrains.annotations.Nullable;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Shown while the chest-stocking test helper is running. Same idea as {@link AgentLockScreen}: only the panel
- * buttons can close it, ESC does nothing.
+ * Shown while the chest-stocking test helper is running. Same idea as {@link AgentLockScreen}: keyboard and mouse only
+ * reach this screen, only the panel buttons close it, ESC does nothing. The job can be paused, continued, left (paused,
+ * with the controls back) or cancelled.
  */
 public final class StockLockScreen extends ChatScreen implements AgentScreen {
     private static final int PANEL_WIDTH = 230;
     private static final int PADDING = 8;
-    private static final int PANEL_HEIGHT = 118;
+    private static final int PANEL_HEIGHT = 138;
     private static final int COLOR_PANEL = 0xB0101418;
     private static final int COLOR_BORDER = 0xFF2DD4BF;
     private static final int COLOR_TEXT = 0xFFE5E7EB;
@@ -25,11 +31,15 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
     private static final int COLOR_TITLE = 0xFF5EEAD4;
     private static final int COLOR_BAR_BG = 0xFF374151;
     private static final int COLOR_BAR = 0xFF22C55E;
+    private static final int COLOR_PAUSED = 0xFFFBBF24;
 
-    private @Nullable ButtonWidget cancelButton;
-    private @Nullable ConfigSlider speedSlider;
+    private final List<ClickableWidget> panelButtons = new ArrayList<>();
+    private ButtonWidget pauseButton;
+    private ButtonWidget resumeButton;
     private int panelX;
     private int panelY;
+    /** Texts of the panel end here, above the slider. */
+    private int contentBottom;
 
     public StockLockScreen() {
         super("", false);
@@ -40,16 +50,50 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
         super.init();
         this.panelX = this.width - PANEL_WIDTH - 6;
         this.panelY = 6;
+        int fullWidth = PANEL_WIDTH - PADDING * 2;
+        int buttonWidth = (fullWidth - 8) / 3;
+        int x = this.panelX + PADDING;
         int buttonY = this.panelY + PANEL_HEIGHT - 26;
-        this.speedSlider = this.addSelectableChild(ConfigSlider.speed(this.panelX + PADDING, buttonY - 24, PANEL_WIDTH - PADDING * 2));
-        this.cancelButton = this.addSelectableChild(ButtonWidget.builder(Chat.tr("stock.cancel"),
+        int sliderY = buttonY - 24;
+        this.contentBottom = sliderY - 4;
+
+        ConfigSlider speed = this.addSelectableChild(ConfigSlider.speed(x, sliderY, fullWidth));
+        this.pauseButton = this.addSelectableChild(ButtonWidget.builder(Chat.tr("lock.pause"),
+                        button -> AgentManager.get().pauseStocking())
+                .dimensions(x, buttonY, buttonWidth, 20).build());
+        this.resumeButton = this.addSelectableChild(ButtonWidget.builder(Chat.tr("lock.resume"),
+                        button -> AgentManager.get().resumeStocking())
+                .dimensions(x, buttonY, buttonWidth, 20).build());
+        ButtonWidget cancel = this.addSelectableChild(ButtonWidget.builder(Chat.tr("stock.cancel"),
                         button -> AgentManager.get().cancelStocking())
-                .dimensions(this.panelX + PADDING, buttonY, PANEL_WIDTH - PADDING * 2, 20).build());
+                .dimensions(x + buttonWidth + 4, buttonY, buttonWidth, 20).build());
+        ButtonWidget leave = this.addSelectableChild(ButtonWidget.builder(Chat.tr("lock.leave"),
+                        button -> AgentManager.get().leaveStocking())
+                .dimensions(x + (buttonWidth + 4) * 2, buttonY, buttonWidth, 20).build());
+
+        this.panelButtons.clear();
+        this.panelButtons.addAll(List.of(speed, this.pauseButton, this.resumeButton, cancel, leave));
+        this.updateButtons();
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        this.updateButtons();
+    }
+
+    private void updateButtons() {
+        StockAgent job = AgentManager.get().stockAgent();
+        boolean paused = job != null && job.isPaused();
+        this.pauseButton.visible = !paused;
+        this.pauseButton.active = job != null;
+        this.resumeButton.visible = paused;
     }
 
     @Override
     public boolean keyPressed(KeyInput input) {
         if (input.isEscape()) {
+            // Only the panel buttons may close this screen, so an accidental ESC press cannot disturb the job.
             return true;
         }
         return super.keyPressed(input);
@@ -62,11 +106,8 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
         context.createNewRootLayer();
         this.renderPanel(context);
         context.createNewRootLayer();
-        if (this.speedSlider != null) {
-            this.speedSlider.render(context, mouseX, mouseY, deltaTicks);
-        }
-        if (this.cancelButton != null) {
-            this.cancelButton.render(context, mouseX, mouseY, deltaTicks);
+        for (ClickableWidget button : this.panelButtons) {
+            button.render(context, mouseX, mouseY, deltaTicks);
         }
     }
 
@@ -74,10 +115,8 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
         StockAgent job = AgentManager.get().stockAgent();
         int x = this.panelX;
         int y = this.panelY;
-        int right = x + PANEL_WIDTH;
-        int bottom = y + PANEL_HEIGHT;
 
-        context.fill(x, y, right, bottom, COLOR_PANEL);
+        context.fill(x, y, x + PANEL_WIDTH, y + PANEL_HEIGHT, COLOR_PANEL);
         context.drawStrokedRectangle(x, y, PANEL_WIDTH, PANEL_HEIGHT, COLOR_BORDER);
         int textX = x + PADDING;
         int line = y + PADDING;
@@ -93,20 +132,36 @@ public final class StockLockScreen extends ChatScreen implements AgentScreen {
         context.drawTextWithShadow(this.textRenderer,
                 Chat.tr("stock.level_progress", job.currentLevel(), job.totalLevels()), textX, line, COLOR_TEXT);
         line += 12;
-        this.drawBar(context, textX, line, PANEL_WIDTH - PADDING * 2, job.progress(), COLOR_BAR);
+        this.drawBar(context, textX, line, PANEL_WIDTH - PADDING * 2, job.progress());
         line += 10;
 
-        for (var wrapped : this.textRenderer.wrapLines(job.action(), PANEL_WIDTH - PADDING * 2)) {
-            context.drawTextWithShadow(this.textRenderer, wrapped, textX, line, COLOR_MUTED);
-            line += 10;
+        if (job.isPaused()) {
+            context.drawTextWithShadow(this.textRenderer, Chat.tr("lock.status", Chat.tr("lock.status_paused")), textX, line, COLOR_PAUSED);
+            line += 12;
+            if (!job.pauseReason().isEmpty()) {
+                this.drawWrapped(context, AgentManager.reasonText(job.pauseReason()), textX, line, COLOR_PAUSED);
+            }
+            return;
+        }
+        this.drawWrapped(context, job.action(), textX, line, COLOR_MUTED);
+    }
+
+    /** Draws wrapped text; lines that would reach into the slider are left out. */
+    private void drawWrapped(DrawContext context, Text text, int x, int y, int color) {
+        for (OrderedText wrapped : this.textRenderer.wrapLines(text, PANEL_WIDTH - PADDING * 2)) {
+            if (y + 9 > this.contentBottom) {
+                break;
+            }
+            context.drawTextWithShadow(this.textRenderer, wrapped, x, y, color);
+            y += 10;
         }
     }
 
-    private void drawBar(DrawContext context, int x, int y, int width, double fraction, int color) {
+    private void drawBar(DrawContext context, int x, int y, int width, double fraction) {
         context.fill(x, y, x + width, y + 5, COLOR_BAR_BG);
         int filled = (int) Math.round(width * Math.max(0.0, Math.min(1.0, fraction)));
         if (filled > 0) {
-            context.fill(x, y, x + filled, y + 5, color);
+            context.fill(x, y, x + filled, y + 5, COLOR_BAR);
         }
     }
 }

@@ -25,6 +25,8 @@ import java.util.function.LongPredicate;
 
 public final class WorldNavAdapter implements NavWorld {
     private static final double LOW_BLOCK_HEIGHT = 0.5;
+    /** Low blocks above this height lift the player noticeably (a slab); carpets and trapdoors do not count. */
+    private static final double RAISED_HEIGHT = 0.2;
 
     private final World world;
     private final BlockPos.Mutable mutable = new BlockPos.Mutable();
@@ -82,6 +84,9 @@ public final class WorldNavAdapter implements NavWorld {
             double top = collision.getMax(net.minecraft.util.math.Direction.Axis.Y);
             if (top <= LOW_BLOCK_HEIGHT && !state.isIn(BlockTags.FENCES) && !state.isIn(BlockTags.WALLS)) {
                 flags |= PASSABLE | SOLID_TOP;
+                if (top > RAISED_HEIGHT) {
+                    flags |= RAISED;
+                }
             } else if (top <= 1.0) {
                 flags |= SOLID_TOP;
             }

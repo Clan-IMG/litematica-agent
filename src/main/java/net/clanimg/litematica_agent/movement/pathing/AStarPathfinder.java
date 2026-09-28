@@ -148,7 +148,7 @@ public final class AStarPathfinder {
                 }
             }
 
-            if (this.canOccupy(nx, y + 1, nz) && this.isSupported(nx, y + 1, nz) && this.isPassable(x, y + 2, z)) {
+            if (this.canJumpUp(x, y, z, nx, nz)) {
                 out.add(new Step(nx, y + 1, nz, MoveType.ASCEND, COST_ASCEND));
             }
         }
@@ -251,11 +251,33 @@ public final class AStarPathfinder {
         out.add(new Step(nx, ny, nz, move, cost));
     }
 
+    /**
+     * A jump reaches about 1.25 blocks: one block up is fine, but not onto a low block (e.g. a slab) lying on top of
+     * the next block, which would be 1.5 blocks higher. The jump itself needs headroom above the start.
+     */
+    private boolean canJumpUp(int x, int y, int z, int nx, int nz) {
+        if (!this.canOccupy(nx, y + 1, nz) || !this.isSupported(nx, y + 1, nz) || !this.isPassable(x, y + 2, z)) {
+            return false;
+        }
+        boolean raisedHere = this.has(x, y, z, NavWorld.RAISED);
+        if (this.has(nx, y + 1, nz, NavWorld.RAISED) && !raisedHere) {
+            return false;
+        }
+        return !raisedHere || this.isPassable(x, y + 3, z);
+    }
+
+    /**
+     * The player's body fits: feet and head block free, and one more block above when standing half a block higher
+     * on a low block.
+     */
     private boolean canOccupy(int x, int y, int z) {
         int feet = this.flags(x, y, z);
         int head = this.flags(x, y + 1, z);
-        return (feet & NavWorld.PASSABLE) != 0 && (head & NavWorld.PASSABLE) != 0
-                && ((feet | head) & (NavWorld.DANGER | NavWorld.UNLOADED)) == 0;
+        if ((feet & NavWorld.PASSABLE) == 0 || (head & NavWorld.PASSABLE) == 0
+                || ((feet | head) & (NavWorld.DANGER | NavWorld.UNLOADED)) != 0) {
+            return false;
+        }
+        return (feet & NavWorld.RAISED) == 0 || this.isPassable(x, y + 2, z);
     }
 
     private boolean isSupported(int x, int y, int z) {

@@ -158,4 +158,9 @@ public final class BreakTask implements AgentTask {
     public String failureReason() {
         return this.failure;
     }
+
+    @Override
+    public BlockPos focus() {
+        return this.pos;
+    }
 }

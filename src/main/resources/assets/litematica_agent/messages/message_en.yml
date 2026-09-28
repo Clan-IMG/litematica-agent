@@ -45,6 +45,8 @@ hover:
   resume: "Let the agent continue building"
   start: "Start the agent - it takes over the controls"
   start_partial: "Start now - blocks without materials are left for later"
+  stock_cancel: "Stop stocking - the chests filled so far stay"
+  stock_resume: "Continue stocking where it stopped"
   storage_keep: "Keep using the saved storage data"
   storage_rescan: "Delete the storage data and scan the chests again"
 
@@ -87,7 +89,7 @@ help:
   settings: "&b  /agent settings &7- all settings in a menu"
   blocks: "&b  /agent blocks &7- build order: layer by layer or selected blocks"
   deposit: "&b  /agent deposit &7- bring leftover materials back to the storage"
-  stock: "&b  /agent stock &7- creative only: fill chests with the materials of the schematic"
+  stock: "&b  /agent stock [resume|cancel] &7- creative only: fill chests with the materials of the schematic"
   language: "&b  /agent language <name> &7- change the language (en, de)"
 
 home:
@@ -98,6 +100,7 @@ home:
   storage_set: "&7The agent uses &b%s &7to get to the storage."
 
 hud:
+  agent_view: "AGENT VIEW"
   empty_inventory: "Please empty your inventory (tools and food may stay)"
   materials: "Storage scan: %s/%s materials complete"
   more: "... and %s more"
@@ -214,9 +217,16 @@ queue:
 
 reason:
   break_timeout: "breaking took too long"
+  cancelled: "cancelled by you"
+  chest_full: "the chest is full"
+  chest_not_connected: "the two chests did not join into a double chest"
+  container_closed: "the chest could not be opened or was closed"
   emergency_low_health: "critical health"
+  fill_failed: "the items did not arrive in the chest"
   helper_not_removed: "helper block could not be removed"
   interaction_failed: "block could not be adjusted"
+  interrupted: "another menu was opened"
+  inventory_full: "your inventory is full - make some room"
   missing_material: "material missing"
   missing_tool: "tool missing"
   no_placement_option: "no suitable placement direction"
@@ -224,6 +234,7 @@ reason:
   not_confirmed: "placement was not confirmed by the server"
   path: "no path found"
   skipped: "skipped"
+  timeout: "a step took too long"
   unknown: "unknown error"
   unreachable: "not reachable"
   wrong_block: "another block is in the way (skipped)"
@@ -249,6 +260,8 @@ settings:
   agent_fps: "Agent FPS: %s"
   agent_fps_limited: "Agent FPS: %s (PC: %s)"
   agent_fps_tooltip: "How often per second the agent turns the camera. More is smoother, your frame rate is the upper limit. Walking always runs at 20 steps per second, like for every player."
+  agent_view: "Agent view"
+  agent_view_tooltip: "Top left: a grey 3D picture of the world exactly as the agent sees it. Light blocks can be stood on, flat ones are low blocks like slabs, black ones are dangerous. White: the planned path and the block it works on. Shows why the agent goes somewhere."
   auto_tool: "Auto tool"
   auto_tool_tooltip: "When you mine a block yourself, the best tool from your hotbar or inventory goes into your hand - also for the next block while you keep holding. Tools about to break are spared."
   eat_at: "Eat at hunger: %s"
@@ -309,12 +322,16 @@ status:
 stock:
   action_fill: "Filling the chest at %s"
   action_place: "Placing a chest at %s"
+  blocked: "&7There is no room for the chests at &b%s&7. Stand where &b2 &7blocks wide and &b%s &7blocks high are free in front of you, or clear the spot."
   cancel: "Cancel"
+  cancelled: "&7Chest stocking cancelled. The chests filled so far stay."
   creative_required: "&7This only works in creative mode."
   done: "&7Done: &b%s &7double chests filled with &b%s &7items in total."
   failed: "&7Chest stocking stopped: &b%s"
   level_progress: "Chest %s/%s"
   no_materials: "&7The schematic has no materials that could be stocked."
+  paused: "&7Chest stocking paused."
+  paused_reason: "&7Chest stocking paused: &b%s"
   started: "&7Building &b%s &7double chests for &b%s &7material types (&b%s &7items in total)."
   title: "CHEST STOCK"
 

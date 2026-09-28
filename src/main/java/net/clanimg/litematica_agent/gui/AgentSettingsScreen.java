@@ -87,7 +87,9 @@ public final class AgentSettingsScreen extends GameOptionsScreen implements Agen
                         }));
         this.body.addWidgetEntry(
                 toggle("material_hud", config.showMaterialHud, value -> config.showMaterialHud = value),
-                toggle("verbose_logging", config.verboseLogging, value -> config.verboseLogging = value));
+                toggle("agent_view", config.showAgentView, value -> config.showAgentView = value));
+        this.body.addWidgetEntry(
+                toggle("verbose_logging", config.verboseLogging, value -> config.verboseLogging = value), null);
     }
 
     private static CyclingButtonWidget<Boolean> toggle(String key, boolean value, Consumer<Boolean> setter) {

@@ -28,6 +28,7 @@ public class SurvivalBuildGameTest implements FabricClientGameTest {
     @Override
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
+        GameTestSupport.resetRotationCheck();
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getClientWorld().waitForChunksRender();
             TestServerContext server = singleplayer.getServer();
@@ -88,6 +89,8 @@ public class SurvivalBuildGameTest implements FabricClientGameTest {
             }, 100);
             context.takeScreenshot("survival-03-ready");
 
+            // The test opened the chests itself without looking at them; only the agent's clicks count.
+            GameTestSupport.resetRotationCheck();
             context.runOnClient(client -> AgentManager.get().begin(sessionId));
             context.waitTicks(120);
             context.takeScreenshot("survival-04-building");
@@ -98,6 +101,7 @@ public class SurvivalBuildGameTest implements FabricClientGameTest {
                 throw new AssertionError("Agent paused: " + paused.pauseReason + " " + paused.pauseArgs);
             }
             GameTestSupport.assertBuilt(context, placement, "survival");
+            GameTestSupport.assertNoRotationMismatches("survival");
 
             // Leftovers go back into the chests.
             context.runOnClient(client -> AgentManager.get().deposit());

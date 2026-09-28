@@ -4,6 +4,7 @@ import fi.dy.masa.litematica.schematic.placement.SchematicPlacement;
 import net.clanimg.litematica_agent.agent.AgentManager;
 import net.clanimg.litematica_agent.agent.AgentSession;
 import net.clanimg.litematica_agent.agent.SessionState;
+import net.clanimg.litematica_agent.storage.ContainerRecord;
 import net.clanimg.litematica_agent.movement.InputController;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
@@ -26,6 +27,7 @@ public class SessionManagementGameTest implements FabricClientGameTest {
     @Override
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
+        GameTestSupport.resetRotationCheck();
         TestWorldSave save;
         int sessionC;
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
@@ -105,6 +107,7 @@ public class SessionManagementGameTest implements FabricClientGameTest {
             if (c != null) {
                 GameTestSupport.assertBuilt(context, c, "session-c");
             }
+            GameTestSupport.assertNoRotationMismatches("sessions");
 
             // Cancelling needs a confirmation.
             context.runOnClient(client -> AgentManager.get().startNew());
@@ -112,12 +115,19 @@ public class SessionManagementGameTest implements FabricClientGameTest {
             int sessionD = context.computeOnClient(client -> AgentManager.get().sessions().isEmpty() ? -1
                     : AgentManager.get().sessions().get(0).id);
             if (sessionD > 0) {
+                // A chest scanned for this session: its markings must go with the last session.
+                context.runOnClient(client -> AgentManager.get().storage().put(new ContainerRecord("minecraft:overworld", 1, -60, 1)));
                 context.runOnClient(client -> AgentManager.get().cancel(sessionD, false));
                 assertState(context, sessionD, SessionState.READY);
                 context.runOnClient(client -> AgentManager.get().cancel(sessionD, true));
                 boolean gone = context.computeOnClient(client -> AgentManager.get().findSession(sessionD) == null);
                 if (!gone) {
                     throw new AssertionError("Session must be deleted after confirmed cancel");
+                }
+                boolean storageCleared = context.computeOnClient(client ->
+                        !AgentManager.get().sessions().isEmpty() || AgentManager.get().storage().isEmpty());
+                if (!storageCleared) {
+                    throw new AssertionError("The scanned chests must be forgotten when the last session is cancelled");
                 }
             }
         }

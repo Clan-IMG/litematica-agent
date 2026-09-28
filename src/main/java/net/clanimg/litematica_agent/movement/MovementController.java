@@ -31,6 +31,7 @@ public final class MovementController {
     private static final int PATH_NODE_BUDGET = 20_000;
     private static final int MAX_SEGMENTS = 64;
     private static final long NO_PILLAR_MILLIS = 60_000L;
+    private static final long AVOID_MILLIS = 60_000L;
     /** Longest time for breaking one block below the feet (stone by hand takes about 8 seconds). */
     private static final int MAX_DIG_TICKS = 20 * 20;
 
@@ -58,6 +59,8 @@ public final class MovementController {
     private final Set<Long> noFlyColumns = new HashSet<>();
     /** Positions where pillaring failed, with the time until which they are avoided. */
     private final Map<Long, Long> noPillarUntil = new HashMap<>();
+    /** Feet positions the player got stuck on the way to, with the time until which paths avoid them. */
+    private final Map<Long, Long> avoidUntil = new HashMap<>();
 
     private @Nullable Goal goal;
     private @Nullable PathOptions baseOptions;
@@ -100,6 +103,16 @@ public final class MovementController {
         return this.status == Status.MOVING;
     }
 
+    /** The path being walked, or null. */
+    public @Nullable List<PathNode> path() {
+        return this.path;
+    }
+
+    /** Index of the path node the player has reached. */
+    public int pathIndex() {
+        return this.index;
+    }
+
     public void markNoFly(BlockPos pos) {
         this.noFlyColumns.add(PosUtil.packColumn(pos.getX(), pos.getZ()));
     }
@@ -114,7 +127,8 @@ public final class MovementController {
         return options.withHelperBlocks(canFly ? 0 : helperBlocks)
                 .withMaxNodes(PATH_NODE_BUDGET)
                 .withNoFly(column -> this.noFlyColumns.contains(column))
-                .withNoPillar(pos -> this.noPillarUntil.getOrDefault(pos, 0L) > System.currentTimeMillis());
+                .withNoPillar(pos -> this.noPillarUntil.getOrDefault(pos, 0L) > System.currentTimeMillis())
+                .withForbidden(pos -> this.avoidUntil.getOrDefault(pos, 0L) > System.currentTimeMillis());
     }
 
     /**
@@ -170,6 +184,7 @@ public final class MovementController {
     /** Forgets spots where moving failed, e.g. when the player resumes after fixing something. */
     public void forgetFailures() {
         this.noPillarUntil.clear();
+        this.avoidUntil.clear();
     }
 
     public void stop() {
@@ -368,7 +383,10 @@ public final class MovementController {
             return;
         }
         if (player.isOnGround()) {
-            InputController.setJump(true);
+            // Look down first: the block is placed mid-jump with a view direction the server already knows.
+            if (player.getPitch() > 89.5F && RotationController.isKnownToServer(player)) {
+                InputController.setJump(true);
+            }
             return;
         }
         if (pos.y > from.y() + 1.02 && player.getPitch() > 80.0F) {
@@ -475,8 +493,23 @@ public final class MovementController {
             this.recoveryTicks = 10;
         } else {
             this.stuckLevel = 0;
+            this.avoid(player, next);
             this.replan(player);
         }
+    }
+
+    /**
+     * The step did not work out although the path allowed it, so something is in the way that the path does not know
+     * about (a player, a block shape it misjudged...). That position is avoided for a while and the new path goes
+     * around it instead of trying the same step again.
+     */
+    private void avoid(ClientPlayerEntity player, PathNode next) {
+        World world = player.getEntityWorld();
+        BlockPos feet = new BlockPos(next.x(), next.y(), next.z());
+        LitematicaAgentClient.LOGGER.info("Stuck before {} to {}: below {}, feet {}, head {} - avoiding it for a while",
+                next.move(), feet.toShortString(), world.getBlockState(feet.down()), world.getBlockState(feet),
+                world.getBlockState(feet.up()));
+        this.avoidUntil.put(PosUtil.pack(next.x(), next.y(), next.z()), System.currentTimeMillis() + AVOID_MILLIS);
     }
 
     private void applyRecovery(ClientPlayerEntity player, PathNode next) {

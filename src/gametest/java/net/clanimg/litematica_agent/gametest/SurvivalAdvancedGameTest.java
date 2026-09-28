@@ -29,6 +29,7 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
     @Override
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
+        GameTestSupport.resetRotationCheck();
         try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
             singleplayer.getClientWorld().waitForChunksRender();
             TestServerContext server = singleplayer.getServer();
@@ -53,6 +54,8 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
             scanChest(context);
             context.waitFor(client -> state(towerSession) == SessionState.READY, 100);
 
+            // The test opened the chest itself without looking at it; only the agent's clicks count.
+            GameTestSupport.resetRotationCheck();
             context.runOnClient(client -> AgentManager.get().begin(towerSession));
             context.waitTicks(200);
             // Make the player hungry in the middle of the build: the agent has to eat by itself.
@@ -121,6 +124,7 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
                 throw new AssertionError("Floor session paused again: " + pausedAgain.pauseReason + " " + pausedAgain.pauseArgs);
             }
             GameTestSupport.assertBuilt(context, floor, "floor");
+            GameTestSupport.assertNoRotationMismatches("tower and floor");
         }
     }
 

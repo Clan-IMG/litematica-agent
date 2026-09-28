@@ -2,6 +2,7 @@ package net.clanimg.litematica_agent.agent.task;
 
 import net.clanimg.litematica_agent.agent.BuildAgent;
 import net.clanimg.litematica_agent.movement.MovementController;
+import net.clanimg.litematica_agent.movement.RotationController;
 import net.clanimg.litematica_agent.movement.pathing.Goal;
 import net.clanimg.litematica_agent.placement.Aiming;
 import net.clanimg.litematica_agent.placement.PlacementSolver;
@@ -42,6 +43,8 @@ public final class PlaceTask implements AgentTask {
     private final int index;
     private final BuildTarget target;
     private final @Nullable BlockPos spot;
+    /** Whether a look trick may be used; only when no click without one was found. */
+    private final boolean allowTrick;
     private Phase phase;
     private boolean moving;
     private int timer;
@@ -53,10 +56,11 @@ public final class PlaceTask implements AgentTask {
     private String failure = "";
     private boolean missingItem;
 
-    public PlaceTask(int index, BuildTarget target, @Nullable BlockPos spot) {
+    public PlaceTask(int index, BuildTarget target, @Nullable BlockPos spot, boolean allowTrick) {
         this.index = index;
         this.target = target;
         this.spot = spot;
+        this.allowTrick = allowTrick;
         this.phase = spot == null ? Phase.PREPARE : Phase.MOVE;
     }
 
@@ -103,7 +107,7 @@ public final class PlaceTask implements AgentTask {
         }
         // Stop as soon as the block can be placed from where the player is, not only at the planned spot.
         if (agent.isStable() && !agent.isPlayerInTheWay(this.target)
-                && agent.solver().findFromEye(player, this.target, player.getEyePos(), agent.reach()) != null) {
+                && agent.solver().findFromPlayer(player, this.target, agent.reach(), this.allowTrick) != null) {
             agent.movement().stop();
             return this.next(Phase.PREPARE);
         }
@@ -157,8 +161,16 @@ public final class PlaceTask implements AgentTask {
 
     private Result tickAim(BuildAgent agent, ClientPlayerEntity player) {
         if (this.optionEye != null && player.getEyePos().squaredDistanceTo(this.optionEye) > EYE_MOVED_SQ) {
-            // The player still slides after walking: the planned view direction no longer fits, plan it again.
-            return this.next(Phase.PREPARE);
+            // The player still slides after walking or drifts in water: aim from where the eye is now. The time to aim
+            // keeps running, so a player that never stands still cannot keep the task waiting forever.
+            PlacementSolver.Option updated = agent.solver().findFromEye(player, this.target, player.getEyePos(), agent.reach(), this.allowTrick);
+            if (updated != null && updated.sneak() != this.option.sneak()) {
+                return this.next(Phase.PREPARE);
+            }
+            if (updated != null) {
+                this.option = updated;
+            }
+            this.optionEye = player.getEyePos();
         }
         agent.setHeldSneak(this.option.sneak());
         agent.rotation().setTarget(this.option.yaw(), this.option.pitch());
@@ -166,6 +178,8 @@ public final class PlaceTask implements AgentTask {
         // does not have to rest on the planned point. Look tricks need the planned view direction itself.
         boolean aligned = agent.rotation().isAligned(player, 0.4F);
         if (this.option.lookTrick() ? aligned : this.validHit(agent, player) != null) {
+            // Stop turning: the click waits until the server has received exactly this view direction.
+            agent.rotation().hold(player);
             return this.next(Phase.CLICK);
         }
         if (aligned) {
@@ -180,12 +194,14 @@ public final class PlaceTask implements AgentTask {
 
     private void plan(BuildAgent agent, ClientPlayerEntity player) {
         this.optionEye = player.getEyePos();
-        this.option = agent.solver().findFromEye(player, this.target, this.optionEye, agent.reach());
+        this.option = agent.solver().findFromEye(player, this.target, this.optionEye, agent.reach(), this.allowTrick);
     }
 
     private Result tickClick(BuildAgent agent, ClientPlayerEntity player) {
         agent.setHeldSneak(this.option.sneak());
-        if (!agent.placeCooldownReady()) {
+        // Anti-cheats (e.g. Grim) check a click against the last view direction they received: a click sent before
+        // the turn has reached the server would look like a hack.
+        if (!agent.placeCooldownReady() || !RotationController.isKnownToServer(player)) {
             return Result.RUNNING;
         }
         if (!player.getMainHandStack().isOf(this.target.item())) {
@@ -208,7 +224,8 @@ public final class PlaceTask implements AgentTask {
      */
     private @Nullable BlockHitResult validHit(BuildAgent agent, ClientPlayerEntity player) {
         BlockHitResult hit = this.option.lookTrick() ? this.option.hit() : Aiming.crosshair(player, agent.reach() + 0.5);
-        return hit != null && agent.solver().check(player, this.target, hit, this.option.sneak()) ? hit : null;
+        return hit != null && (this.option.lookTrick() || Aiming.isClearOfEdges(hit))
+                && agent.solver().check(player, this.target, hit, this.option.sneak()) ? hit : null;
     }
 
     /**
@@ -260,6 +277,11 @@ public final class PlaceTask implements AgentTask {
     @Override
     public String failureReason() {
         return this.failure;
+    }
+
+    @Override
+    public BlockPos focus() {
+        return this.target.pos();
     }
 
     static Text posText(BlockPos pos) {

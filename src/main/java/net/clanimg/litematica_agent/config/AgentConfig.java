@@ -89,6 +89,8 @@ public final class AgentConfig {
     /** Maximum distance to the schematic when starting a session. */
     public int maxStartDistance = 64;
     public boolean showMaterialHud = true;
+    /** A small grey 3D picture top left of how the agent sees the world, to understand its decisions. */
+    public boolean showAgentView = true;
     /** Log every failed step with its reason (useful for bug reports). */
     public boolean verboseLogging = false;
 

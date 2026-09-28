@@ -2,6 +2,7 @@ package net.clanimg.litematica_agent.agent.task;
 
 import net.clanimg.litematica_agent.agent.BuildAgent;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
+import net.clanimg.litematica_agent.movement.RotationController;
 import net.clanimg.litematica_agent.placement.Aiming;
 import net.clanimg.litematica_agent.placement.StateMatcher;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
@@ -10,6 +11,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.BlockPos;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -103,6 +105,7 @@ public final class InteractTask implements AgentTask {
                 agent.rotation().setTarget(this.aim.yaw(), this.aim.pitch());
                 // Click as soon as the crosshair is on the planned face of the block, like a player would.
                 if (this.onTarget(agent, player) != null && !player.isSneaking()) {
+                    agent.rotation().hold(player);
                     this.next(Phase.CLICK);
                 } else if (this.timer > 40) {
                     this.failure = "aim_timeout";
@@ -110,7 +113,8 @@ public final class InteractTask implements AgentTask {
                 }
             }
             case CLICK -> {
-                if (!agent.placeCooldownReady()) {
+                // Only with a view direction the server already knows (see PlaceTask).
+                if (!agent.placeCooldownReady() || !RotationController.isKnownToServer(player)) {
                     return Result.RUNNING;
                 }
                 BlockHitResult hit = this.onTarget(agent, player);
@@ -141,7 +145,7 @@ public final class InteractTask implements AgentTask {
     private @Nullable BlockHitResult onTarget(BuildAgent agent, ClientPlayerEntity player) {
         BlockHitResult hit = Aiming.crosshair(player, agent.reach() + 0.5);
         return hit != null && this.aim != null && hit.getBlockPos().equals(this.target.pos())
-                && hit.getSide() == this.aim.hit().getSide() ? hit : null;
+                && hit.getSide() == this.aim.hit().getSide() && Aiming.isClearOfEdges(hit) ? hit : null;
     }
 
     private void next(Phase phase) {
@@ -162,5 +166,10 @@ public final class InteractTask implements AgentTask {
     @Override
     public String failureReason() {
         return this.failure;
+    }
+
+    @Override
+    public BlockPos focus() {
+        return this.target.pos();
     }
 }

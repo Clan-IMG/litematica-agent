@@ -45,6 +45,8 @@ hover:
   resume: "Agent weiterbauen lassen"
   start: "Agent starten - danach übernimmt er die Steuerung"
   start_partial: "Jetzt starten - Blöcke ohne Material werden für später aufgehoben"
+  stock_cancel: "Truhen-Stock beenden - die bisher befüllten Truhen bleiben stehen"
+  stock_resume: "Truhen-Stock an der Stelle fortsetzen, an der er angehalten hat"
   storage_keep: "Die gespeicherten Lagerdaten weiterverwenden"
   storage_rescan: "Lagerdaten löschen und Truhen neu erfassen"
 
@@ -87,7 +89,7 @@ help:
   settings: "&b  /agent settings &7- alle Einstellungen in einem Menü"
   blocks: "&b  /agent blocks &7- Bauweise: Ebene für Ebene oder ausgewählte Blöcke"
   deposit: "&b  /agent deposit &7- übrige Materialien zurück ins Lager bringen"
-  stock: "&b  /agent stock &7- nur Creative: befüllt Truhen mit den Materialien der Schematic"
+  stock: "&b  /agent stock [resume|cancel] &7- nur Creative: befüllt Truhen mit den Materialien der Schematic"
   language: "&b  /agent language <name> &7- Sprache ändern (en, de)"
 
 home:
@@ -98,6 +100,7 @@ home:
   storage_set: "&7Der Agent nutzt &b%s&7, um zum Lager zu kommen."
 
 hud:
+  agent_view: "AGENT-SICHT"
   empty_inventory: "Bitte Inventar leeren (Werkzeuge und Essen dürfen bleiben)"
   materials: "Lager-Scan: %s/%s Materialien vollständig"
   more: "... und %s weitere"
@@ -214,9 +217,16 @@ queue:
 
 reason:
   break_timeout: "Abbauen dauerte zu lange"
+  cancelled: "von dir abgebrochen"
+  chest_full: "die Truhe ist voll"
+  chest_not_connected: "die zwei Truhen haben sich nicht zu einer Doppeltruhe verbunden"
+  container_closed: "die Truhe ließ sich nicht öffnen oder wurde geschlossen"
   emergency_low_health: "Gesundheit kritisch"
+  fill_failed: "die Items sind nicht in der Truhe angekommen"
   helper_not_removed: "Hilfsblock konnte nicht entfernt werden"
   interaction_failed: "Block konnte nicht eingestellt werden"
+  interrupted: "ein anderes Menü wurde geöffnet"
+  inventory_full: "dein Inventar ist voll - mach etwas Platz"
   missing_material: "Material fehlt"
   missing_tool: "Werkzeug fehlt"
   no_placement_option: "keine passende Platzierungsrichtung"
@@ -224,6 +234,7 @@ reason:
   not_confirmed: "Platzierung wurde vom Server nicht bestätigt"
   path: "Weg nicht gefunden"
   skipped: "übersprungen"
+  timeout: "ein Schritt hat zu lange gedauert"
   unknown: "unbekannter Fehler"
   unreachable: "nicht erreichbar"
   wrong_block: "anderer Block im Weg (übersprungen)"
@@ -249,6 +260,8 @@ settings:
   agent_fps: "Agent-FPS: %s"
   agent_fps_limited: "Agent-FPS: %s (PC: %s)"
   agent_fps_tooltip: "Wie oft pro Sekunde der Agent die Kamera dreht. Mehr ist flüssiger, deine FPS sind die Obergrenze. Laufen passiert immer mit 20 Schritten pro Sekunde, wie bei jedem Spieler."
+  agent_view: "Agent-Sicht"
+  agent_view_tooltip: "Oben links: ein graues 3D-Bild der Welt, genau so, wie der Agent sie sieht. Helle Blöcke kann man betreten, flache sind niedrige Blöcke wie Stufen, schwarze sind gefährlich. Weiß: der geplante Weg und der Block, an dem er gerade arbeitet. Zeigt, warum der Agent irgendwo hinläuft."
   auto_tool: "Auto-Tool"
   auto_tool_tooltip: "Wenn du selbst einen Block abbaust, kommt das beste Werkzeug aus Hotbar oder Inventar in die Hand - auch für den nächsten Block, solange du gedrückt hältst. Fast kaputte Werkzeuge werden geschont."
   eat_at: "Essen ab Hunger: %s"
@@ -309,12 +322,16 @@ status:
 stock:
   action_fill: "Befüllt die Truhe bei %s"
   action_place: "Platziert eine Truhe bei %s"
+  blocked: "&7Bei &b%s &7ist kein Platz für die Truhen. Stell dich so hin, dass vor dir &b2 &7Blöcke breit und &b%s &7Blöcke hoch frei sind, oder räume die Stelle frei."
   cancel: "Abbrechen"
+  cancelled: "&7Truhen-Stock abgebrochen. Die bisher befüllten Truhen bleiben stehen."
   creative_required: "&7Das funktioniert nur im Creative-Modus."
   done: "&7Fertig: &b%s &7Doppeltruhen mit insgesamt &b%s &7Items befüllt."
   failed: "&7Truhen-Stock abgebrochen: &b%s"
   level_progress: "Truhe %s/%s"
   no_materials: "&7Die Schematic enthält keine Materialien, die gelagert werden könnten."
+  paused: "&7Truhen-Stock pausiert."
+  paused_reason: "&7Truhen-Stock pausiert: &b%s"
   started: "&7Baue &b%s &7Doppeltruhen für &b%s &7Materialarten (insgesamt &b%s &7Items)."
   title: "TRUHEN-STOCK"
 

@@ -18,6 +18,12 @@ import org.jetbrains.annotations.Nullable;
  * Finds a visible point on a block to look at and click, e.g. to open a chest or to break a block.
  */
 public final class Aiming {
+    /**
+     * Distance a click keeps from the edges of the block, see {@link #isClearOfEdges}. The server's view of the eye
+     * differs by less than a thousandth of a block; more margin would rule out the thin faces of repeaters and carpets.
+     */
+    private static final double EDGE_MARGIN = 0.01;
+
     private Aiming() {
     }
 
@@ -62,5 +68,22 @@ public final class Aiming {
     public static @Nullable BlockHitResult crosshair(ClientPlayerEntity player, double reach) {
         HitResult result = player.raycast(reach, 1.0F, false);
         return result instanceof BlockHitResult blockHit && result.getType() == HitResult.Type.BLOCK ? blockHit : null;
+    }
+
+    /**
+     * Whether the hit lies on its face with some distance to the edges of the block. The server sees the eye a tiny
+     * bit elsewhere (the client does not send very small movements), so a click right at an edge may miss the block
+     * there, and anti-cheats flag it.
+     */
+    public static boolean isClearOfEdges(BlockHitResult hit) {
+        Vec3d inBlock = hit.getPos().subtract(Vec3d.of(hit.getBlockPos()));
+        Direction.Axis axis = hit.getSide().getAxis();
+        return (axis == Direction.Axis.X || clearOfEdges(inBlock.x))
+                && (axis == Direction.Axis.Y || clearOfEdges(inBlock.y))
+                && (axis == Direction.Axis.Z || clearOfEdges(inBlock.z));
+    }
+
+    private static boolean clearOfEdges(double coordinate) {
+        return coordinate >= EDGE_MARGIN && coordinate <= 1.0 - EDGE_MARGIN;
     }
 }

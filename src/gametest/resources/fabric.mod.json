@@ -6,6 +6,7 @@
   "environment": "client",
   "entrypoints": {
     "fabric-client-gametest": [
+      "net.clanimg.litematica_agent.gametest.StockGameTest",
       "net.clanimg.litematica_agent.gametest.HomeTravelGameTest",
       "net.clanimg.litematica_agent.gametest.CreativeBuildGameTest",
       "net.clanimg.litematica_agent.gametest.SurvivalBuildGameTest",

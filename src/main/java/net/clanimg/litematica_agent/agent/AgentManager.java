@@ -7,6 +7,7 @@ import net.clanimg.litematica_agent.gui.AgentLockScreen;
 import net.clanimg.litematica_agent.gui.AgentScreen;
 import net.clanimg.litematica_agent.gui.StockLockScreen;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
+import net.clanimg.litematica_agent.movement.MovementController;
 import net.clanimg.litematica_agent.movement.RotationController;
 import net.clanimg.litematica_agent.persistence.JsonStore;
 import net.clanimg.litematica_agent.persistence.WorldData;
@@ -14,6 +15,7 @@ import net.clanimg.litematica_agent.placement.StateMatcher;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.schematic.PlacementRef;
 import net.clanimg.litematica_agent.schematic.SchematicAccess;
+import net.clanimg.litematica_agent.schematic.SurvivalCheck;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
 import net.clanimg.litematica_agent.storage.StorageDatabase;
 import net.clanimg.litematica_agent.ui.Chat;
@@ -32,6 +34,7 @@ import net.minecraft.registry.Registries;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.text.MutableText;
+import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -216,8 +219,12 @@ public final class AgentManager {
             this.ensureLockScreen(client);
         }
 
-        if (this.stockAgent != null && this.checkStockScreen(client)) {
+        if (this.stockAgent != null && !this.stockAgent.isPaused() && this.checkStockScreen(client)) {
             this.stockAgent.tick();
+            if (this.stockAgent.isPaused()) {
+                // A step did not work out: the lock screen shows why, the chat offers to continue or cancel.
+                this.announceStockPause();
+            }
             if (client.currentScreen == null) {
                 client.setScreen(new StockLockScreen());
             }
@@ -246,7 +253,7 @@ public final class AgentManager {
         RotationController rotation = null;
         if (this.agent != null && this.isAgentActive(this.agent)) {
             rotation = this.agent.rotation();
-        } else if (this.stockAgent != null) {
+        } else if (this.stockAgent != null && !this.stockAgent.isPaused()) {
             rotation = this.stockAgent.rotation();
         }
         if (rotation == null) {
@@ -261,6 +268,20 @@ public final class AgentManager {
         double ticks = this.lastFrameNanos == 0L ? 0.0 : Math.min(2.0, (now - this.lastFrameNanos) / 50_000_000.0);
         this.lastFrameNanos = now;
         rotation.frame(player, ticks);
+    }
+
+    /** Path and current block of the agent that is working right now, for the agent view. */
+    public record WorkView(MovementController movement, @Nullable BlockPos focus) {
+    }
+
+    public @Nullable WorkView workView() {
+        if (this.agent != null && this.isAgentActive(this.agent)) {
+            return new WorkView(this.agent.movement(), this.agent.focus());
+        }
+        if (this.stockAgent != null && !this.stockAgent.isPaused()) {
+            return new WorkView(this.stockAgent.movement(), this.stockAgent.focus());
+        }
+        return null;
     }
 
     private boolean isAgentActive(BuildAgent candidate) {
@@ -299,8 +320,8 @@ public final class AgentManager {
     }
 
     /**
-     * Same idea as {@link #checkScreen}, but for the chest-stocking helper: any screen the player opens themselves
-     * cancels the job instead of pausing it, since there is nothing to resume afterwards.
+     * Same idea as {@link #checkScreen}, but for the chest-stocking helper: a screen the player opens pauses the job,
+     * which can be continued afterwards.
      */
     private boolean checkStockScreen(MinecraftClient client) {
         Screen screen = client.currentScreen;
@@ -314,9 +335,51 @@ public final class AgentManager {
             client.setScreen(new StockLockScreen());
             return true;
         }
-        this.stockAgent.cancel("interrupted");
-        this.completeStocking();
+        LitematicaAgentClient.LOGGER.info("Chest stocking paused: {} was opened", screen.getClass().getName());
+        this.stockAgent.pause("interrupted");
+        this.announceStockPause();
         return false;
+    }
+
+    /** Pause button of the stock lock screen; the screen stays open and offers to continue. */
+    public void pauseStocking() {
+        if (this.stockAgent != null && !this.stockAgent.isPaused()) {
+            this.stockAgent.pause("");
+        }
+    }
+
+    /** Leave button of the stock lock screen: the job pauses and the player gets the controls back. */
+    public void leaveStocking() {
+        if (this.stockAgent != null) {
+            this.pauseStocking();
+            this.announceStockPause();
+        }
+        MinecraftClient.getInstance().setScreen(null);
+    }
+
+    public void resumeStocking() {
+        if (this.stockAgent == null) {
+            Chat.error(Chat.tr("error.nothing_running"));
+            return;
+        }
+        if (this.agent != null) {
+            Chat.error(Chat.tr("error.agent_busy"));
+            return;
+        }
+        if (this.stockAgent.isPaused()) {
+            this.stockAgent.resume();
+        }
+        MinecraftClient.getInstance().setScreen(new StockLockScreen());
+    }
+
+    private void announceStockPause() {
+        StockAgent job = this.stockAgent;
+        MutableText message = job.pauseReason().isEmpty() ? Chat.tr("stock.paused")
+                : Chat.tr("stock.paused_reason", reasonText(job.pauseReason()));
+        Chat.info(message.append(" ")
+                .append(Chat.button(Chat.tr("button.resume"), "/agent stock resume", Chat.tr("hover.stock_resume")))
+                .append(" ")
+                .append(Chat.button(Chat.tr("button.cancel"), "/agent stock cancel", Chat.tr("hover.stock_cancel"))));
     }
 
     private void completeStocking() {
@@ -327,8 +390,10 @@ public final class AgentManager {
         if (client.currentScreen instanceof StockLockScreen) {
             client.setScreen(null);
         }
-        if (finished.isFailed()) {
-            Chat.warn(Chat.tr("stock.failed", finished.failureReason()));
+        if (finished.isFailed() && "cancelled".equals(finished.failureReason())) {
+            Chat.info(Chat.tr("stock.cancelled"));
+        } else if (finished.isFailed()) {
+            Chat.warn(Chat.tr("stock.failed", reasonText(finished.failureReason())));
         } else {
             Chat.success(Chat.tr("stock.done", finished.totalLevels(), finished.totalItemsNeeded()));
         }
@@ -731,6 +796,10 @@ public final class AgentManager {
         if (player == null || client.world == null) {
             return;
         }
+        if (this.stockAgent != null && this.stockAgent.isPaused() && this.agent == null) {
+            this.resumeStocking();
+            return;
+        }
         if (this.agent != null || this.stockAgent != null) {
             Chat.error(Chat.tr("error.agent_busy"));
             return;
@@ -746,7 +815,9 @@ public final class AgentManager {
         }
         SchematicAccess.SchematicReadResult read;
         try {
-            read = SchematicAccess.readTargets(placement);
+            // The same material list as a survival session of this schematic, e.g. dirt where grass would turn into
+            // dirt under a block, so the stocked chests hold exactly what the agent will look for.
+            read = SurvivalCheck.apply(SchematicAccess.readTargets(placement), client.world);
         } catch (RuntimeException e) {
             LitematicaAgentClient.LOGGER.error("Could not read schematic {}", placement.getName(), e);
             Chat.error(Chat.tr("error.read_failed", placement.getName()));
@@ -765,6 +836,11 @@ public final class AgentManager {
         }
 
         StockAgent job = StockAgent.create(this, client, materials);
+        BlockPos blocked = job.firstBlocked(client.world);
+        if (blocked != null) {
+            Chat.error(Chat.tr("stock.blocked", blocked.toShortString(), job.totalLevels()));
+            return;
+        }
         this.stockAgent = job;
         job.activate();
         Chat.success(Chat.tr("stock.started", job.totalLevels(), materials.size(), job.totalItemsNeeded()));
@@ -968,6 +1044,10 @@ public final class AgentManager {
         if (this.agent != null) {
             this.pause(this.agent, "", List.of());
         }
+        if (this.stockAgent != null && !this.stockAgent.isPaused()) {
+            this.stockAgent.pause("");
+            this.announceStockPause();
+        }
     }
 
     /**
@@ -1026,6 +1106,12 @@ public final class AgentManager {
             client.setScreen(null);
         }
         Chat.info(Chat.tr("info.cancelled", session.id, session.name()));
+        // The scanned chests hold the stacks selected for this session. Without any session left that selection has
+        // no use, and the next session starts with a fresh scan instead of old markings.
+        if (this.worldData.sessions.isEmpty() && !this.storage.isEmpty()) {
+            this.storage.clear();
+            Chat.info(Chat.tr("info.storage_cleared"));
+        }
         this.save();
     }
 
@@ -1086,11 +1172,25 @@ public final class AgentManager {
             case "interaction_failed", "state_changed" -> "interaction_failed";
             case "break_timeout" -> "break_timeout";
             case "wrong_block" -> "wrong_block";
-            case "missing_material" -> "missing_material";
+            case "missing_material", "missing_item" -> "missing_material";
             case "missing_tool" -> "missing_tool";
             case "skipped" -> "skipped";
+            case "chest_full" -> "chest_full";
+            case "chest_not_connected" -> "chest_not_connected";
+            case "container_not_opened", "container_closed" -> "container_closed";
+            case "fill_failed" -> "fill_failed";
+            case "inventory_full" -> "inventory_full";
+            case "interrupted" -> "interrupted";
+            case "timeout" -> "timeout";
+            case "cancelled" -> "cancelled";
             default -> "unknown";
         };
+    }
+
+    /** Readable text for a failure reason; reasons without a text of their own are shown as they are. */
+    public static Text reasonText(String reason) {
+        String key = reasonKey(reason);
+        return "unknown".equals(key) && reason != null && !reason.isEmpty() ? Text.literal(reason) : Chat.tr("reason." + key);
     }
 
     private static boolean hasLeftovers(PlayerInventory inventory) {

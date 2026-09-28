@@ -146,6 +146,7 @@ public final class BuildAgent {
     private final MovementController.HelperBlocks helperBlocks = new PillarHelper();
     private @Nullable AgentTask task;
     private long tick;
+    private long lastClickTick = -1L;
     private int taskTicks;
     private long lastHomeTick = -100_000L;
     private int placeCooldown;
@@ -297,7 +298,8 @@ public final class BuildAgent {
                 InputController.setJump(true);
             }
         }
-        if (this.config().agentFps <= AgentConfig.MIN_AGENT_FPS) {
+        // Not in a tick with a click: the movement packet sent after it has to carry the view direction of the click.
+        if (this.config().agentFps <= AgentConfig.MIN_AGENT_FPS && this.lastClickTick != this.tick) {
             this.rotation.tick(player);
         }
 
@@ -475,8 +477,10 @@ public final class BuildAgent {
             switch (candidate.kind()) {
                 case PLACE -> {
                     BuildTarget placement = placement(target);
-                    if (!this.isPlayerInTheWay(placement) && this.solver.findFromEye(player, placement, eye, this.reach()) != null) {
-                        this.start(new PlaceTask(candidate.index(), placement, null));
+                    // Clicks without a look trick only: a trick is left to the stand position search, which tries
+                    // every other position first.
+                    if (!this.isPlayerInTheWay(placement) && this.solver.findFromPlayer(player, placement, this.reach(), false) != null) {
+                        this.start(new PlaceTask(candidate.index(), placement, null, false));
                         return;
                     }
                 }
@@ -524,7 +528,7 @@ public final class BuildAgent {
                     }
                     PlacementSolver.StandSpot spot = this.findPlaceSpot(placement);
                     if (spot != null) {
-                        this.start(new PlaceTask(candidate.index(), placement, spot.feet()));
+                        this.start(new PlaceTask(candidate.index(), placement, spot.feet(), spot.option().lookTrick()));
                         return;
                     }
                     if (this.defer(candidate.index(), "no_stand_spot")) {
@@ -973,18 +977,20 @@ public final class BuildAgent {
 
     private boolean placeHelper(int targetIndex, BuildTarget helperTarget) {
         BlockPos spot = null;
-        if (this.solver.findFromEye(this.player(), helperTarget, this.player().getEyePos(), this.reach()) == null) {
+        boolean trick = false;
+        if (this.solver.findFromPlayer(this.player(), helperTarget, this.reach(), false) == null) {
             PlacementSolver.StandSpot standSpot = this.solver.findStandSpot(this.player(), helperTarget, this.reach(),
                     this.canFly(), this.standable(), STAND_SPOT_CANDIDATES);
             if (standSpot == null) {
                 return false;
             }
             spot = standSpot.feet();
+            trick = standSpot.option().lookTrick();
         }
         long key = helperTarget.pos().asLong();
         this.helpers.add(key);
         this.supportHelpers.computeIfAbsent(targetIndex, ignored -> new ArrayList<>()).add(key);
-        this.start(new PlaceTask(-1, helperTarget, spot));
+        this.start(new PlaceTask(-1, helperTarget, spot, trick));
         return true;
     }
 
@@ -1029,11 +1035,12 @@ public final class BuildAgent {
         @Override
         public boolean placeOnTop(BlockPos below) {
             Item item = BuildAgent.this.helperItem();
-            if (item == null || !InventoryHelper.select(BuildAgent.this.client, item) || !BuildAgent.this.placeCooldownReady()) {
+            if (item == null || !InventoryHelper.select(BuildAgent.this.client, item) || !BuildAgent.this.placeCooldownReady()
+                    || !RotationController.isKnownToServer(BuildAgent.this.player())) {
                 return false;
             }
             BlockHitResult hit = Aiming.crosshair(BuildAgent.this.player(), BuildAgent.this.reach());
-            if (hit == null || !hit.getBlockPos().equals(below) || hit.getSide() != Direction.UP) {
+            if (hit == null || !hit.getBlockPos().equals(below) || hit.getSide() != Direction.UP || !Aiming.isClearOfEdges(hit)) {
                 return false;
             }
             BuildAgent.this.clickBlock(hit);
@@ -1251,6 +1258,11 @@ public final class BuildAgent {
         return this.movement;
     }
 
+    /** The block the current task is about, or null. */
+    public @Nullable BlockPos focus() {
+        return this.task == null ? null : this.task.focus();
+    }
+
     public double reach() {
         return Math.max(3.0, this.player().getBlockInteractionRange() - 0.4);
     }
@@ -1382,6 +1394,7 @@ public final class BuildAgent {
             player.swingHand(Hand.MAIN_HAND);
         }
         this.placeCooldown = this.config().placeDelayTicks();
+        this.lastClickTick = this.tick;
     }
 
     public void onBlockPlaced(BlockPos pos) {

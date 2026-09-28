@@ -116,7 +116,8 @@ public final class InventoryHelper {
             ItemStack stack = new ItemStack(item, item.getMaxCount());
             inventory.setSelectedSlot(hotbarSlot);
             inventory.setStack(hotbarSlot, stack);
-            client.interactionManager.clickCreativeStack(stack, HOTBAR_SLOT_OFFSET + hotbarSlot);
+            // A copy: in singleplayer the server would otherwise share the client's stack object.
+            client.interactionManager.clickCreativeStack(stack.copy(), HOTBAR_SLOT_OFFSET + hotbarSlot);
             return true;
         }
 

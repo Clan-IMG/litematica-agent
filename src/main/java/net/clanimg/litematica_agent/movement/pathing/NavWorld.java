@@ -19,6 +19,11 @@ public interface NavWorld {
     int HELPER = 1 << 6;
     /** Passable, but taken by a block a placed block cannot replace (lever, torch, flower, open door...). */
     int OCCUPIED = 1 << 7;
+    /**
+     * A low block the player can stand in (a bottom slab, a daylight detector...): the feet are about half a block
+     * higher than on the block below, so it cannot be jumped onto from one block lower and needs more headroom.
+     */
+    int RAISED = 1 << 8;
 
     int flags(int x, int y, int z);
 }

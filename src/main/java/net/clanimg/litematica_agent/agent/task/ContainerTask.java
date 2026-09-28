@@ -2,6 +2,7 @@ package net.clanimg.litematica_agent.agent.task;
 
 import net.clanimg.litematica_agent.agent.BuildAgent;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
+import net.clanimg.litematica_agent.movement.RotationController;
 import net.clanimg.litematica_agent.placement.Aiming;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
 import net.clanimg.litematica_agent.ui.Chat;
@@ -134,15 +135,19 @@ public final class ContainerTask implements AgentTask {
                     this.next(Phase.APPROACH);
                     return Result.RUNNING;
                 }
-                agent.rotation().setTarget(aim.yaw(), aim.pitch());
-                if (agent.rotation().isAligned(player, 1.0F) && !player.isSneaking()) {
-                    BlockHitResult hit = Aiming.crosshair(player, agent.reach() + 0.5);
-                    if (hit != null && hit.getBlockPos().equals(pos)) {
+                BlockHitResult hit = Aiming.crosshair(player, agent.reach() + 0.5);
+                if (hit != null && hit.getBlockPos().equals(pos) && Aiming.isClearOfEdges(hit) && !player.isSneaking()) {
+                    // On the chest: stop turning and click once the server knows this view direction.
+                    agent.rotation().hold(player);
+                    if (RotationController.isKnownToServer(player)) {
                         agent.setOperatingContainer(true);
                         agent.clickBlock(hit);
                         this.next(Phase.WAIT_OPEN);
                     }
-                } else if (this.timer > 40) {
+                } else {
+                    agent.rotation().setTarget(aim.yaw(), aim.pitch());
+                }
+                if (this.phase == Phase.AIM && this.timer > 40) {
                     this.next(Phase.APPROACH);
                     this.approach = new Approach(pos);
                 }
@@ -322,6 +327,15 @@ public final class ContainerTask implements AgentTask {
     @Override
     public String failureReason() {
         return this.failure;
+    }
+
+    @Override
+    public @Nullable BlockPos focus() {
+        if (this.visitIndex >= this.visits.size()) {
+            return null;
+        }
+        ContainerRecord container = this.visits.get(this.visitIndex).container();
+        return new BlockPos(container.x, container.y, container.z);
     }
 
     @Override

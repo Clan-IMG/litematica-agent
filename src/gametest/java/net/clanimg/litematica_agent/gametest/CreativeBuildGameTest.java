@@ -21,6 +21,7 @@ public class CreativeBuildGameTest implements FabricClientGameTest {
     @Override
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
+        GameTestSupport.resetRotationCheck();
         context.runOnClient(client -> AgentManager.get().config().speed = AgentConfig.FASTEST_SPEED);
         try {
             this.buildAndCheck(context);
@@ -57,6 +58,8 @@ public class CreativeBuildGameTest implements FabricClientGameTest {
                 throw new AssertionError("Agent paused: " + paused.pauseReason + " " + paused.pauseArgs);
             }
             GameTestSupport.assertBuilt(context, placement, "creative");
+            // The observer facing up on the floor can only be placed with a look trick, which anti-cheats notice.
+            GameTestSupport.LOGGER.info("Right-clicks with look tricks in the creative hut: {}", GameTestSupport.rotationMismatches());
             context.runOnClient(client -> GameTestSupport.removePlacement(client, placement));
         }
     }

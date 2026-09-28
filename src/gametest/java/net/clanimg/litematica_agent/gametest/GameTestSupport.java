@@ -12,19 +12,70 @@ import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.schematic.SchematicAccess;
 import net.clanimg.litematica_agent.ui.Chat;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.EntityPose;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class GameTestSupport {
     static final Logger LOGGER = LoggerFactory.getLogger("litematica_agent_gametest");
+    /**
+     * Right-clicks on blocks the server received while the view direction it knew did not point at the clicked block.
+     * Anti-cheats such as Grim (RotationPlace) flag exactly that, so every test expects none.
+     */
+    private static final AtomicInteger ROTATION_MISMATCHES = new AtomicInteger();
+
+    static {
+        UseBlockCallback.EVENT.register((player, world, hand, hit) -> {
+            if (!world.isClient() && !viewPointsAt(player, hit.getBlockPos())) {
+                ROTATION_MISMATCHES.incrementAndGet();
+                LOGGER.warn("Right-click on {} while the server's view direction does not point at it (yaw {}, pitch {}, eye {})",
+                        hit.getBlockPos().toShortString(), player.getYaw(), player.getPitch(), player.getEyePos());
+            }
+            return ActionResult.PASS;
+        });
+    }
 
     private GameTestSupport() {
+    }
+
+    /** Like Grim: a ray along the view direction, from the standing or the crouching eye, reaches the clicked block. */
+    private static boolean viewPointsAt(PlayerEntity player, BlockPos pos) {
+        net.minecraft.util.math.Box block = new net.minecraft.util.math.Box(pos);
+        Vec3d direction = player.getRotationVector().multiply(player.getBlockInteractionRange() + 1.0);
+        for (float eyeHeight : new float[]{player.getEyeHeight(EntityPose.STANDING), player.getEyeHeight(EntityPose.CROUCHING)}) {
+            Vec3d eye = player.getEntityPos().add(0.0, eyeHeight, 0.0);
+            if (block.contains(eye) || block.raycast(eye, eye.add(direction)).isPresent()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Starts counting right-clicks with a view direction that does not fit (see {@link #ROTATION_MISMATCHES}). */
+    static void resetRotationCheck() {
+        ROTATION_MISMATCHES.set(0);
+    }
+
+    static int rotationMismatches() {
+        return ROTATION_MISMATCHES.get();
+    }
+
+    static void assertNoRotationMismatches(String what) {
+        int mismatches = ROTATION_MISMATCHES.get();
+        if (mismatches > 0) {
+            throw new AssertionError(what + ": " + mismatches + " right-clicks with a view direction an anti-cheat would flag");
+        }
     }
 
     /**
