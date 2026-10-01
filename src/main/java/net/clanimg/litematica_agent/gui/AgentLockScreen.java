@@ -12,6 +12,7 @@ import net.clanimg.litematica_agent.inventory.InventoryHelper;
 import net.clanimg.litematica_agent.planning.BuildPlan;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.ui.Chat;
+import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.client.gui.tooltip.Tooltip;
@@ -19,6 +20,7 @@ import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.input.KeyInput;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.util.InputUtil;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.Registries;
@@ -27,6 +29,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
 import org.jetbrains.annotations.Nullable;
+import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -42,11 +45,14 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     private static final int PANEL_WIDTH = 230;
     private static final int MAX_PANEL_HEIGHT = 272;
     private static final int PADDING = 8;
+    private static final int SCROLLBAR_WIDTH = 5;
+    private static final int SCROLL_STEP = 30;
     /** Space between the icon and its count, and between two entries of the item row. */
     private static final int ITEM_TEXT_GAP = 2;
     private static final int ITEM_GAP = 8;
     private static final int ITEM_ROW_HEIGHT = 18;
-    private static final int COLOR_PANEL = 0xB0101418;
+    /** Opaque enough that chat lines behind the panel (small windows) do not show through the text. */
+    private static final int COLOR_PANEL = 0xD8101418;
     private static final int COLOR_BORDER = 0xFF2DD4BF;
     private static final int COLOR_TEXT = 0xFFE5E7EB;
     private static final int COLOR_MUTED = 0xFF9CA3AF;
@@ -69,9 +75,47 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     private boolean modeMenuOpen;
     private int panelX;
     private int panelY;
+    private int panelWidth;
     private int panelHeight;
-    /** Texts and items of the panel end here, above the buttons. */
+    private int contentTop;
     private int contentBottom;
+    private int contentHeight;
+    private double scrollOffset;
+    private double scrollbarGrabOffset;
+    private boolean draggingScrollbar;
+    private final List<PanelRow> contentRows = new ArrayList<>();
+    /** Bounded cache: repeated long instructions are wrapped only when their text or the viewport width changes. */
+    private final Map<Text, List<OrderedText>> wrappedTexts = new LinkedHashMap<>();
+    private @Nullable Text displayedPauseReason;
+
+    private interface PanelRow {
+        int y();
+        int height();
+        void draw(AgentLockScreen screen, DrawContext context, int x, int y);
+    }
+
+    private record TextRow(int y, OrderedText text, int color) implements PanelRow {
+        @Override public int height() { return 10; }
+        @Override public void draw(AgentLockScreen screen, DrawContext context, int x, int y) {
+            context.drawTextWithShadow(screen.textRenderer, this.text, x, y, this.color);
+        }
+    }
+
+    private record BarRow(int y, double fraction, int color) implements PanelRow {
+        @Override public int height() { return 5; }
+        @Override public void draw(AgentLockScreen screen, DrawContext context, int x, int y) {
+            screen.drawBar(context, x, y, screen.contentWidth(), this.fraction, this.color);
+        }
+    }
+
+    private record ItemRow(int xOffset, int y, ItemStack stack, String count) implements PanelRow {
+        @Override public int height() { return ITEM_ROW_HEIGHT; }
+        @Override public void draw(AgentLockScreen screen, DrawContext context, int x, int y) {
+            context.drawItem(this.stack, x + this.xOffset, y);
+            context.drawTextWithShadow(screen.textRenderer, this.count,
+                    x + this.xOffset + 16 + ITEM_TEXT_GAP, y + 4, COLOR_TEXT);
+        }
+    }
 
     public AgentLockScreen() {
         super("", false);
@@ -80,16 +124,19 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     @Override
     protected void init() {
         super.init();
-        this.panelX = this.width - PANEL_WIDTH - 6;
+        this.panelWidth = Math.min(PANEL_WIDTH, this.width - 12);
+        this.panelX = this.width - this.panelWidth - 6;
         this.panelY = 6;
-        this.panelHeight = Math.min(MAX_PANEL_HEIGHT, this.height - 12);
+        // Leave the chat entry field visible and keep all controls anchored inside the window.
+        this.panelHeight = Math.min(MAX_PANEL_HEIGHT, this.height - 28);
         int bottom = this.panelY + this.panelHeight;
         int toolsY = bottom - 98;
+        this.contentTop = this.panelY + PADDING + 14;
         this.contentBottom = toolsY - 4;
         int buttonY = bottom - 74;
         int speedY = bottom - 50;
         int modeY = bottom - 26;
-        int fullWidth = PANEL_WIDTH - PADDING * 2;
+        int fullWidth = this.panelWidth - PADDING * 2;
         int halfWidth = (fullWidth - 4) / 2;
         int buttonWidth = (fullWidth - 8) / 3;
         int x = this.panelX + PADDING;
@@ -142,7 +189,10 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
         this.panelButtons.clear();
         this.panelButtons.addAll(List.of(this.viewButton, this.strategyButton, this.pauseButton, this.resumeButton,
                 this.approveButton, this.cancelButton, this.rejectButton, leave, speed, this.modeButton, settings));
+        this.wrappedTexts.clear();
+        this.draggingScrollbar = false;
         this.updateButtons();
+        this.updateContent();
     }
 
     private ButtonWidget modeOption(WrongBlockMode mode, int x, int y, int width) {
@@ -181,6 +231,7 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     public void tick() {
         super.tick();
         this.updateButtons();
+        this.updateContent();
     }
 
     private void updateButtons() {
@@ -207,8 +258,15 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
                 : view == MaterialView.TOTAL ? "lock.view_total" : "lock.view_inventory";
         this.viewButton.setMessage(Chat.tr(viewKey).append(" ⇄"));
         this.strategyButton.active = manager.focused() != null;
-        this.strategyButton.setMessage((blocks ? Chat.tr("lock.strategy_blocks", session.blockQueue.size())
-                : Chat.tr("lock.strategy_layers")).append(" ▸"));
+        Text strategyText = session == null ? Chat.tr("lock.strategy_layers") : switch (session.strategy) {
+            case LAYERS_TOP_DOWN -> Chat.tr("lock.strategy_top_down");
+            case PROXIMITY -> Chat.tr("lock.strategy_proximity");
+            default -> Chat.tr("lock.strategy_layers");
+        };
+        if (session != null && !session.blockQueue.isEmpty()) {
+            strategyText = strategyText.copy().append(" ▪" + session.blockQueue.size());
+        }
+        this.strategyButton.setMessage(strategyText.copy().append(" ▸"));
 
         WrongBlockMode current = manager.config().wrongBlockMode;
         this.modeButton.setMessage(Chat.tr("lock.mode", modeName(current)).append(" ▼"));
@@ -263,6 +321,24 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
             // ESC press cannot hand control back to the player.
             return true;
         }
+        if (input.getKeycode() == InputUtil.GLFW_KEY_F4) {
+            // Let the player watch in freecam while the agent keeps building. This does not pause anything -
+            // AgentManager brings the panel back once the same key toggles freecam off again.
+            AgentManager.get().allowFreecam();
+            this.client.setScreen(null);
+            return true;
+        }
+        // Page keys scroll instructions even while chat owns focus. Plain Home/End retain chat caret behavior.
+        int key = input.getKeycode();
+        if (key == GLFW.GLFW_KEY_PAGE_UP || key == GLFW.GLFW_KEY_PAGE_DOWN) {
+            this.scrollBy((key == GLFW.GLFW_KEY_PAGE_UP ? -1 : 1) * Math.max(10, this.viewportHeight() - 10));
+            return true;
+        }
+        if ((input.modifiers() & GLFW.GLFW_MOD_CONTROL) != 0
+                && (key == GLFW.GLFW_KEY_HOME || key == GLFW.GLFW_KEY_END)) {
+            this.scrollOffset = key == GLFW.GLFW_KEY_HOME ? 0 : this.maxScroll();
+            return true;
+        }
         if (input.isEnter()) {
             String text = this.chatField.getText();
             if (!text.isBlank()) {
@@ -272,6 +348,118 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
             return true;
         }
         return super.keyPressed(input);
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (this.isInPanel(mouseX, mouseY)) {
+            this.scrollBy(-verticalAmount * SCROLL_STEP);
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+    }
+
+    @Override
+    public boolean mouseClicked(Click click, boolean doubled) {
+        if (!this.modeMenuOpen && click.button() == GLFW.GLFW_MOUSE_BUTTON_LEFT && this.maxScroll() > 0
+                && click.x() >= this.scrollbarX() - 2 && click.x() < this.panelX + this.panelWidth - 2
+                && click.y() >= this.contentTop && click.y() < this.contentBottom) {
+            int thumbY = this.scrollbarThumbY();
+            this.scrollbarGrabOffset = click.y() >= thumbY && click.y() < thumbY + this.scrollbarThumbHeight()
+                    ? click.y() - thumbY : this.scrollbarThumbHeight() / 2.0;
+            this.draggingScrollbar = true;
+            this.dragScrollbar(click.y());
+            return true;
+        }
+        // ChatScreen handles chat links before child widgets. Panel controls must win over links hidden behind it.
+        if (this.modeMenuOpen) {
+            for (ButtonWidget option : this.modeOptions) {
+                if (this.clickPanelWidget(option, click, doubled)) {
+                    return true;
+                }
+            }
+        }
+        if (this.isInPanel(click.x(), click.y())) {
+            for (ClickableWidget widget : this.panelButtons) {
+                if (this.clickPanelWidget(widget, click, doubled)) {
+                    return true;
+                }
+            }
+            return true;
+        }
+        return super.mouseClicked(click, doubled);
+    }
+
+    private boolean clickPanelWidget(ClickableWidget widget, Click click, boolean doubled) {
+        if (widget.mouseClicked(click, doubled)) {
+            this.setFocused(widget);
+            if (click.button() == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
+                this.setDragging(true);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public boolean mouseDragged(Click click, double deltaX, double deltaY) {
+        if (this.draggingScrollbar && click.button() == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
+            this.dragScrollbar(click.y());
+            return true;
+        }
+        return super.mouseDragged(click, deltaX, deltaY);
+    }
+
+    @Override
+    public boolean mouseReleased(Click click) {
+        if (this.draggingScrollbar && click.button() == GLFW.GLFW_MOUSE_BUTTON_LEFT) {
+            this.draggingScrollbar = false;
+            return true;
+        }
+        return super.mouseReleased(click);
+    }
+
+    private boolean isInPanel(double x, double y) {
+        return x >= this.panelX && x < this.panelX + this.panelWidth
+                && y >= this.panelY && y < this.panelY + this.panelHeight;
+    }
+
+    private int contentWidth() {
+        return Math.max(1, this.panelWidth - PADDING * 2 - SCROLLBAR_WIDTH - 3);
+    }
+
+    private int viewportHeight() {
+        return Math.max(1, this.contentBottom - this.contentTop);
+    }
+
+    private int maxScroll() {
+        return Math.max(0, this.contentHeight - this.viewportHeight());
+    }
+
+    private void scrollBy(double amount) {
+        this.scrollOffset = Math.max(0, Math.min(this.maxScroll(), this.scrollOffset + amount));
+    }
+
+    private int scrollbarX() {
+        return this.panelX + this.panelWidth - PADDING - SCROLLBAR_WIDTH;
+    }
+
+    private int scrollbarThumbHeight() {
+        return Math.min(this.viewportHeight(), Math.max(12,
+                (int) ((long) this.viewportHeight() * this.viewportHeight() / Math.max(1, this.contentHeight))));
+    }
+
+    private int scrollbarThumbY() {
+        int travel = this.viewportHeight() - this.scrollbarThumbHeight();
+        return this.contentTop + (int) Math.round(travel * this.scrollOffset / Math.max(1, this.maxScroll()));
+    }
+
+    private void dragScrollbar(double mouseY) {
+        int travel = this.viewportHeight() - this.scrollbarThumbHeight();
+        if (travel > 0) {
+            this.scrollOffset = Math.max(0, Math.min(this.maxScroll(),
+                    (mouseY - this.contentTop - this.scrollbarGrabOffset) * this.maxScroll() / travel));
+        }
     }
 
     @Override
@@ -294,99 +482,111 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
     }
 
     private void renderPanel(DrawContext context) {
+        int x = this.panelX;
+        int y = this.panelY;
+        context.fill(x, y, x + this.panelWidth, y + this.panelHeight, COLOR_PANEL);
+        context.drawStrokedRectangle(x, y, this.panelWidth, this.panelHeight, COLOR_BORDER);
+        context.drawTextWithShadow(this.textRenderer, Text.literal("LITEMATICA AGENT").formatted(Formatting.BOLD),
+                x + PADDING, y + PADDING, COLOR_TITLE);
+
+        // Clip every primitive (including item icons and bars), not just wrapped text. Layout always keeps all rows.
+        context.enableScissor(x + PADDING, this.contentTop, this.scrollbarX() - 3, this.contentBottom);
+        int offset = (int) this.scrollOffset;
+        for (PanelRow row : this.contentRows) {
+            int rowY = this.contentTop + row.y() - offset;
+            if (rowY + row.height() > this.contentTop && rowY < this.contentBottom) {
+                row.draw(this, context, x + PADDING, rowY);
+            }
+        }
+        context.disableScissor();
+        if (this.maxScroll() > 0) {
+            int scrollX = this.scrollbarX();
+            context.fill(scrollX, this.contentTop, scrollX + SCROLLBAR_WIDTH, this.contentBottom, COLOR_BAR_BG);
+            int thumbY = this.scrollbarThumbY();
+            context.fill(scrollX, thumbY, scrollX + SCROLLBAR_WIDTH, thumbY + this.scrollbarThumbHeight(), COLOR_BORDER);
+        }
+    }
+
+    /** A snapshot per game tick, independent of render FPS, keeps long instructions inexpensive to display. */
+    private void updateContent() {
+        this.contentRows.clear();
+        this.contentHeight = this.layoutContent();
+        this.scrollBy(0); // Clamp after resize or after a long message/material list disappears.
+    }
+
+    private int layoutContent() {
         AgentManager manager = AgentManager.get();
         BuildAgent agent = manager.activeAgent();
         AgentSession session = manager.activeSession();
-        int x = this.panelX;
-        int y = this.panelY;
-        int right = x + PANEL_WIDTH;
-        int bottom = y + this.panelHeight;
-
-        context.fill(x, y, right, bottom, COLOR_PANEL);
-        context.drawStrokedRectangle(x, y, PANEL_WIDTH, this.panelHeight, COLOR_BORDER);
-        int textX = x + PADDING;
-        int line = y + PADDING;
-
-        context.drawTextWithShadow(this.textRenderer, Text.literal("LITEMATICA AGENT").formatted(Formatting.BOLD), textX, line, COLOR_TITLE);
-        line += 14;
-
+        int line = 0;
         if (agent == null) {
-            context.drawTextWithShadow(this.textRenderer, Chat.tr("lock.idle"), textX, line, COLOR_MUTED);
-            return;
+            return this.addWrapped(Chat.tr("lock.idle"), line, COLOR_MUTED);
         }
         if (session == null) {
-            context.drawTextWithShadow(this.textRenderer, Chat.tr("lock.depositing"), textX, line, COLOR_TEXT);
-            line += 12;
-            this.drawWrapped(context, agent.action(), textX, line, COLOR_MUTED);
-            return;
+            line = this.addWrapped(Chat.tr("lock.depositing"), line, COLOR_TEXT) + 2;
+            return this.addWrapped(agent.action(), line, COLOR_MUTED);
         }
-
-        context.drawTextWithShadow(this.textRenderer, Text.literal("#" + session.id + "  " + session.name()), textX, line, COLOR_TEXT);
-        line += 12;
-
+        line = this.addWrapped(Text.literal("#" + session.id + "  " + session.name()), line, COLOR_TEXT) + 2;
         boolean paused = session.state == SessionState.PAUSED;
         Text status = paused ? Chat.tr("lock.status_paused") : Chat.tr("lock.status_building");
-        context.drawTextWithShadow(this.textRenderer, Chat.tr("lock.status", status), textX, line, paused ? COLOR_PAUSED : COLOR_BAR);
-        line += 12;
-        if (paused && !session.pauseReason.isEmpty()) {
-            line = this.drawWrapped(context, Chat.trList(session.pauseReason, session.pauseArgs), textX, line, COLOR_PAUSED);
+        line = this.addWrapped(Chat.tr("lock.status", status), line, paused ? COLOR_PAUSED : COLOR_BAR) + 2;
+        Text pauseReason = paused && !session.pauseReason.isEmpty()
+                ? Chat.trList(session.pauseReason, session.pauseArgs) : null;
+        if (pauseReason != null) {
+            if (!pauseReason.equals(this.displayedPauseReason)) {
+                this.scrollOffset = 0; // A new problem must be visible, even after reading a previous message's end.
+            }
+            line = this.addWrapped(pauseReason, line, COLOR_PAUSED) + 2;
         }
+        this.displayedPauseReason = pauseReason;
 
         int total = Math.max(1, session.totalBlocks);
         int done = session.doneBlocks;
-        double percent = done * 100.0 / total;
-        context.drawTextWithShadow(this.textRenderer,
-                Chat.tr("lock.progress", String.format("%.1f", percent), done, session.totalBlocks), textX, line, COLOR_TEXT);
-        line += 11;
-        this.drawBar(context, textX, line, PANEL_WIDTH - PADDING * 2, done / (double) total, COLOR_BAR);
+        line = this.addWrapped(Chat.tr("lock.progress", String.format("%.1f", done * 100.0 / total),
+                done, session.totalBlocks), line, COLOR_TEXT) + 1;
+        this.contentRows.add(new BarRow(line, done / (double) total, COLOR_BAR));
         line += 9;
-
-        if (agent.runtime() != null && session.strategy == BuildStrategy.LAYERS) {
+        if (agent.runtime() != null && session.strategy != BuildStrategy.BLOCKS && session.strategy != BuildStrategy.PROXIMITY) {
             BuildPlan<BuildTarget> plan = agent.runtime().plan();
             int layerY = plan.currentLayerY();
             if (layerY != Integer.MIN_VALUE) {
                 int layerIndex = plan.layerIndexOfY(layerY);
                 int[] layer = plan.layerProgress(layerIndex);
-                context.drawTextWithShadow(this.textRenderer,
-                        Chat.tr("lock.layer", layerY, layerIndex + 1, plan.layerCount()), textX, line, COLOR_TEXT);
-                line += 11;
-                this.drawBar(context, textX, line, PANEL_WIDTH - PADDING * 2,
-                        layer[1] == 0 ? 0.0 : layer[0] / (double) layer[1], COLOR_LAYER_BAR);
+                line = this.addWrapped(Chat.tr("lock.layer", layerY, layerIndex + 1, plan.layerCount()), line, COLOR_TEXT) + 1;
+                this.contentRows.add(new BarRow(line,
+                        layer[1] == 0 ? 0.0 : layer[0] / (double) layer[1], COLOR_LAYER_BAR));
                 line += 9;
             }
         }
-
         Text eta = agent.hasEtaMeasurement()
                 ? Chat.tr("lock.eta", agent.remainingMinutes())
                 : Chat.tr("lock.eta_estimate", agent.remainingMinutes());
-        context.drawTextWithShadow(this.textRenderer, eta, textX, line, COLOR_TEXT);
-        line += 12;
-
-        context.drawTextWithShadow(this.textRenderer, Chat.tr("lock.action"), textX, line, COLOR_MUTED);
-        line += 10;
-        line = this.drawWrapped(context, paused ? Chat.tr("lock.waiting_for_player") : agent.action(), textX, line, COLOR_TEXT);
-
-        this.drawMaterials(context, textX, line + 2, agent.runtime(), session);
+        line = this.addWrapped(eta, line, COLOR_TEXT) + 2;
+        line = this.addWrapped(Chat.tr("lock.action"), line, COLOR_MUTED);
+        line = this.addWrapped(paused ? Chat.tr("lock.waiting_for_player") : agent.action(), line, COLOR_TEXT);
+        return this.addMaterials(line + 2, agent.runtime(), session);
     }
 
-    /**
-     * The item row: what the current layer (or the queued block types) still needs, what the whole schematic still
-     * needs, or what is in the inventory, depending on the view button.
-     */
-    private void drawMaterials(DrawContext context, int x, int y, @Nullable SessionRuntime runtime, AgentSession session) {
+    /** Lay out every material; the viewport decides which rows to draw. */
+    private int addMaterials(int y, @Nullable SessionRuntime runtime, AgentSession session) {
         MaterialView view = AgentManager.get().config().materialView;
         List<Map.Entry<Item, Integer>> entries;
         if (view == MaterialView.INVENTORY) {
             entries = this.inventoryMaterials();
         } else if (runtime == null) {
-            return;
+            return y;
         } else if (view == MaterialView.TOTAL) {
             entries = sortedByCount(runtime.remainingMaterials());
-        } else if (session.strategy == BuildStrategy.BLOCKS) {
+        } else if (session.strategy == BuildStrategy.BLOCKS || !session.blockQueue.isEmpty()) {
             Map<Item, Integer> queued = new LinkedHashMap<>();
+            Map<Item, Integer> remainingMaterials = runtime.remainingMaterials();
             for (String id : session.blockQueue) {
-                Item item = Registries.ITEM.get(Identifier.tryParse(id));
-                int remaining = runtime.remainingMaterials().getOrDefault(item, 0);
+                Identifier identifier = Identifier.tryParse(id);
+                if (identifier == null) {
+                    continue;
+                }
+                Item item = Registries.ITEM.get(identifier);
+                int remaining = remainingMaterials.getOrDefault(item, 0);
                 if (remaining > 0) {
                     queued.put(item, remaining);
                 }
@@ -397,36 +597,25 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
             int layerY = plan.currentLayerY();
             entries = layerY == Integer.MIN_VALUE ? List.of() : sortedByCount(runtime.remainingInLayer(plan.layerIndexOfY(layerY)));
         }
-
         if (view != MaterialView.INVENTORY) {
-            if (y + 9 > this.contentBottom) {
-                return;
-            }
             int sum = 0;
             for (Map.Entry<Item, Integer> entry : entries) {
                 sum += entry.getValue();
             }
-            context.drawTextWithShadow(this.textRenderer, Chat.tr("lock.remaining_blocks", sum), x, y, COLOR_MUTED);
-            y += 11;
+            y = this.addWrapped(Chat.tr("lock.remaining_blocks", sum), y, COLOR_MUTED) + 1;
         }
-        // Every entry is as wide as its icon and count, so a long number never runs into the next icon. Rows continue
-        // below as long as there is room above the buttons.
-        int right = x + PANEL_WIDTH - PADDING * 2;
-        int itemX = x;
+        int itemX = 0;
         for (Map.Entry<Item, Integer> entry : entries) {
             String count = compact(entry.getValue());
             int width = 16 + ITEM_TEXT_GAP + this.textRenderer.getWidth(count);
-            if (itemX > x && itemX + width > right) {
-                itemX = x;
+            if (itemX > 0 && itemX + width > this.contentWidth()) {
+                itemX = 0;
                 y += ITEM_ROW_HEIGHT;
             }
-            if (y + 16 > this.contentBottom) {
-                break;
-            }
-            context.drawItem(new ItemStack(entry.getKey()), itemX, y);
-            context.drawTextWithShadow(this.textRenderer, Text.literal(count), itemX + 16 + ITEM_TEXT_GAP, y + 4, COLOR_TEXT);
+            this.contentRows.add(new ItemRow(itemX, y, new ItemStack(entry.getKey()), count));
             itemX += width + ITEM_GAP;
         }
+        return y + (entries.isEmpty() ? 0 : ITEM_ROW_HEIGHT);
     }
 
     private List<Map.Entry<Item, Integer>> inventoryMaterials() {
@@ -458,13 +647,17 @@ public final class AgentLockScreen extends ChatScreen implements AgentScreen {
         return count >= 100_000 ? (count / 1000) + "k" : String.valueOf(count);
     }
 
-    /** Draws wrapped text; lines that would reach into the buttons are left out. */
-    private int drawWrapped(DrawContext context, Text text, int x, int y, int color) {
-        for (OrderedText line : this.textRenderer.wrapLines(text, PANEL_WIDTH - PADDING * 2)) {
-            if (y + 9 > this.contentBottom) {
-                break;
+    private int addWrapped(Text text, int y, int color) {
+        List<OrderedText> lines = this.wrappedTexts.get(text);
+        if (lines == null) {
+            lines = this.textRenderer.wrapLines(text, this.contentWidth());
+            if (this.wrappedTexts.size() >= 32) {
+                this.wrappedTexts.remove(this.wrappedTexts.keySet().iterator().next());
             }
-            context.drawTextWithShadow(this.textRenderer, line, x, y, color);
+            this.wrappedTexts.put(text.copy(), lines);
+        }
+        for (OrderedText line : lines) {
+            this.contentRows.add(new TextRow(y, line, color));
             y += 10;
         }
         return y;

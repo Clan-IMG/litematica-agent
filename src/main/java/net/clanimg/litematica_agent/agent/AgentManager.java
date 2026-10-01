@@ -5,6 +5,7 @@ import net.clanimg.litematica_agent.LitematicaAgentClient;
 import net.clanimg.litematica_agent.config.AgentConfig;
 import net.clanimg.litematica_agent.gui.AgentLockScreen;
 import net.clanimg.litematica_agent.gui.AgentScreen;
+import net.clanimg.litematica_agent.gui.PathParticles;
 import net.clanimg.litematica_agent.gui.StockLockScreen;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
 import net.clanimg.litematica_agent.movement.MovementController;
@@ -15,9 +16,9 @@ import net.clanimg.litematica_agent.placement.StateMatcher;
 import net.clanimg.litematica_agent.schematic.BuildTarget;
 import net.clanimg.litematica_agent.schematic.PlacementRef;
 import net.clanimg.litematica_agent.schematic.SchematicAccess;
-import net.clanimg.litematica_agent.schematic.SurvivalCheck;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
 import net.clanimg.litematica_agent.storage.StorageDatabase;
+import net.clanimg.litematica_agent.storage.StorageHomes;
 import net.clanimg.litematica_agent.ui.Chat;
 import net.clanimg.litematica_agent.ui.Messages;
 import net.minecraft.client.MinecraftClient;
@@ -27,6 +28,8 @@ import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -48,8 +51,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * Owns all sessions of the current world, drives the preparation steps and the active {@link BuildAgent}.
@@ -74,6 +80,8 @@ public final class AgentManager {
     private @Nullable SessionRuntime focused;
     private @Nullable BuildAgent agent;
     private @Nullable StockAgent stockAgent;
+    /** A schematic being read in the background; one at a time. */
+    private @Nullable CompletableFuture<?> loading;
     private @Nullable SessionState promptedState;
     private boolean dirty;
     private long lastSave;
@@ -81,7 +89,40 @@ public final class AgentManager {
     private boolean farStorageWarned;
     private @Nullable List<MaterialStatus> statusCache;
     private long statusCacheTime;
+    /** Set while the agent waits for the player to set a home at the storage, see {@link #onCommandSent}. */
+    private boolean awaitingStorageHome;
+    /** A /sethome within this distance of a scanned chest counts as the home of that storage. */
+    private static final double STORAGE_HOME_RADIUS = 16.0;
+    /** Whether the lock screen was deliberately closed for the player to watch in freecam; see {@link #allowFreecam}. */
+    private boolean freecamGrace;
+    private boolean freecamKeyWasDown;
     private long lastFrameNanos;
+    /**
+     * How soon a paused session quietly tries again by itself, see {@link #tryAutoRecover}. Each try that ends in
+     * the same problem doubles the wait up to {@link #MAX_AUTO_RETRY_INTERVAL_MILLIS}: something the player fixes is
+     * noticed within seconds, something that cannot be fixed is not recomputed every few seconds for hours.
+     */
+    private static final long AUTO_RETRY_INTERVAL_MILLIS = 5_000L;
+    private static final long MAX_AUTO_RETRY_INTERVAL_MILLIS = 30_000L;
+    /**
+     * Reasons that need the player's own decision and are never retried automatically - including the end of a build
+     * where everything else stands and the rest failed even after the recovery rounds: trying those again and again
+     * on its own would only take the controls away from the player every few minutes for nothing.
+     */
+    private static final Set<String> NO_AUTO_RETRY_REASONS = Set.of(
+            "", "pause.died", "pause.emergency", "pause.switched", "pause.screen_opened", "pause.selection_done",
+            "pause.blocks_failed");
+    private long nextAutoRetryMillis = Long.MAX_VALUE;
+    private long autoRetryDelayMillis = AUTO_RETRY_INTERVAL_MILLIS;
+    /** Set while {@link #tryAutoRecover} probes a paused session, so a repeat of the very same problem stays quiet. */
+    private boolean autoRetryProbing;
+    /**
+     * Set by an automatic retry until the next pause: that pause is a repeat when it names the same problem as the
+     * one the retry started from, whether it comes in the same tick or after a walk and a few placements.
+     */
+    private boolean autoRetryCycle;
+    private String autoRetryPrevReason = "";
+    private List<String> autoRetryPrevArgs = List.of();
 
     private AgentManager() {
     }
@@ -151,10 +192,19 @@ public final class AgentManager {
         this.focused = null;
         this.agent = null;
         this.stockAgent = null;
+        this.cancelLoading();
         this.promptedState = null;
         this.farStorageWarned = false;
         this.joinTicks = 0;
         this.safety.reset();
+    }
+
+    /** A schematic still being read belongs to the world that was left: its result is dropped. */
+    private void cancelLoading() {
+        if (this.loading != null) {
+            this.loading.cancel(false);
+            this.loading = null;
+        }
     }
 
     public void onDisconnect() {
@@ -170,6 +220,7 @@ public final class AgentManager {
             this.stockAgent.suspend();
             this.stockAgent = null;
         }
+        this.cancelLoading();
         this.save();
         this.worldKey = null;
         this.focused = null;
@@ -189,6 +240,52 @@ public final class AgentManager {
         JsonStore.saveWorld(this.worldKey, this.worldData);
         this.dirty = false;
         this.lastSave = System.currentTimeMillis();
+    }
+
+    /** The agent asked for a home at the storage (pause.storage_home_required); see {@link #onCommandSent}. */
+    public void awaitStorageHome() {
+        this.awaitingStorageHome = true;
+    }
+
+    /**
+     * Every command the player sends. While the agent waits for a storage home, the server's own {@code /sethome}
+     * typed right at the storage is taken as that home, so there is nothing else to register.
+     */
+    public void onCommandSent(String command) {
+        String[] parts = command.trim().split("\\s+");
+        if (!this.awaitingStorageHome || parts.length == 0 || !parts[0].equalsIgnoreCase("sethome")) {
+            return;
+        }
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.world == null) {
+            return;
+        }
+        String dimension = client.world.getRegistryKey().getValue().toString();
+        ContainerRecord nearest = null;
+        double closest = Double.MAX_VALUE;
+        for (ContainerRecord container : this.storage.containers()) {
+            double distance = container.distanceSq(client.player.getX(), client.player.getY(), client.player.getZ());
+            if (container.dimension.equals(dimension) && distance < closest) {
+                nearest = container;
+                closest = distance;
+            }
+        }
+        if (nearest == null) {
+            return;
+        }
+        if (closest > STORAGE_HOME_RADIUS * STORAGE_HOME_RADIUS) {
+            Chat.warn(Chat.tr("home.storage_too_far", (int) Math.sqrt(closest)));
+            return;
+        }
+        String home = parts.length >= 2 ? "home " + parts[1] : "home";
+        StorageHomes.configure(this.worldData, nearest, home);
+        this.awaitingStorageHome = false;
+        this.save();
+        MutableText message = Chat.tr("home.storage_detected", "/" + home);
+        if (this.focused != null && this.focused.session().state == SessionState.PAUSED) {
+            message.append(" ").append(this.resumeButton(this.focused.session()));
+        }
+        Chat.success(message);
     }
 
     // ---------------------------------------------------------------- tick
@@ -214,10 +311,18 @@ public final class AgentManager {
             }
         }
 
+        this.tryAutoRecover(client);
         if (this.agent != null && this.isAgentActive(this.agent) && this.checkScreen(client)) {
             this.agent.tick();
+            // tick() may finish or fail the session as a side effect, which clears this.agent.
+            if (this.agent != null) {
+                PathParticles.tick(this.agent);
+            }
             this.ensureLockScreen(client);
         }
+        // The flag must survive through the tick() call above, since a re-pause caused by the probe happens there,
+        // not inside tryAutoRecover itself; only now is it safe to drop back to normal (always-announce) pausing.
+        this.autoRetryProbing = false;
 
         if (this.stockAgent != null && !this.stockAgent.isPaused() && this.checkStockScreen(client)) {
             this.stockAgent.tick();
@@ -270,20 +375,6 @@ public final class AgentManager {
         rotation.frame(player, ticks);
     }
 
-    /** Path and current block of the agent that is working right now, for the agent view. */
-    public record WorkView(MovementController movement, @Nullable BlockPos focus) {
-    }
-
-    public @Nullable WorkView workView() {
-        if (this.agent != null && this.isAgentActive(this.agent)) {
-            return new WorkView(this.agent.movement(), this.agent.focus());
-        }
-        if (this.stockAgent != null && !this.stockAgent.isPaused()) {
-            return new WorkView(this.stockAgent.movement(), this.stockAgent.focus());
-        }
-        return null;
-    }
-
     private boolean isAgentActive(BuildAgent candidate) {
         if (candidate.isDepositOnly()) {
             return true;
@@ -314,9 +405,35 @@ public final class AgentManager {
     }
 
     private void ensureLockScreen(MinecraftClient client) {
-        if (this.agent != null && this.isAgentActive(this.agent) && client.currentScreen == null) {
-            client.setScreen(new AgentLockScreen());
+        if (client.currentScreen != null || this.agent == null || !this.isAgentActive(this.agent)) {
+            return;
         }
+        if (this.freecamGrace) {
+            this.checkFreecamToggleOff(client);
+            return;
+        }
+        client.setScreen(new AgentLockScreen());
+    }
+
+    /**
+     * Lets the player leave the lock screen closed to watch in freecam (F4) while the agent keeps building; see
+     * {@link net.clanimg.litematica_agent.gui.AgentLockScreen#keyPressed}.
+     */
+    public void allowFreecam() {
+        this.freecamGrace = true;
+        this.freecamKeyWasDown = true;
+    }
+
+    /**
+     * Freecam has no API to ask whether it is still active, so the same key toggling it back off - while no screen
+     * is open, since freecam itself does not open one - is the only signal available to bring the panel back.
+     */
+    private void checkFreecamToggleOff(MinecraftClient client) {
+        boolean down = InputUtil.isKeyPressed(client.getWindow(), InputUtil.GLFW_KEY_F4);
+        if (down && !this.freecamKeyWasDown) {
+            this.freecamGrace = false;
+        }
+        this.freecamKeyWasDown = down;
     }
 
     /**
@@ -492,19 +609,24 @@ public final class AgentManager {
      */
     public void acceptSkips(int id) {
         AgentSession session = this.findSession(id);
-        ClientPlayerEntity player = MinecraftClient.getInstance().player;
-        if (session == null || player == null || session.state != SessionState.CONFIRM_SKIPS || !this.focus(session)) {
+        if (session == null || session.state != SessionState.CONFIRM_SKIPS) {
             return;
         }
-        Chat.info(Chat.tr("skip.accepted", this.focused.unsupported().size()));
-        this.beginPreparation(session, player.isInCreativeMode());
+        this.focusThen(session, () -> {
+            ClientPlayerEntity player = MinecraftClient.getInstance().player;
+            if (player == null || session.state != SessionState.CONFIRM_SKIPS) {
+                return;
+            }
+            Chat.info(Chat.tr("skip.accepted", this.focused.unsupported().size()));
+            this.beginPreparation(session, player.isInCreativeMode());
+        });
     }
 
     private void beginPreparation(AgentSession session, boolean creative) {
         this.setState(session, creative ? SessionState.READY : SessionState.CHECK_INVENTORY);
         this.promptedState = null;
         Chat.info(Chat.tr(creative ? "info.creative_detected" : "info.survival_detected"));
-        Set<StateMatcher.Tool> tools = this.focused == null ? Set.of() : this.focused.requiredTools();
+        Set<StateMatcher.Tool> tools = this.focused == null ? Set.of() : this.focused.toolsAtStart();
         if (!creative && !tools.isEmpty()) {
             List<String> names = new ArrayList<>();
             for (StateMatcher.Tool tool : tools) {
@@ -756,33 +878,84 @@ public final class AgentManager {
             }
         }
 
+        if (this.stillLoading()) {
+            return;
+        }
         this.pauseActiveForSwitch();
         AgentSession session = new AgentSession(this.worldData.nextSessionId++, ref);
-        SessionRuntime runtime;
-        try {
-            runtime = SessionRuntime.load(session, placement, client.world);
-        } catch (RuntimeException e) {
-            LitematicaAgentClient.LOGGER.error("Could not read schematic {}", placement.getName(), e);
-            Chat.error(Chat.tr("error.read_failed", placement.getName()));
-            return;
-        }
-        if (runtime.plan().size() == 0) {
-            Chat.error(Chat.tr("error.empty_schematic"));
-            return;
-        }
-        this.worldData.sessions.add(session);
-        this.focused = runtime;
-        this.promptedState = null;
-        this.farStorageWarned = false;
+        this.loadSession(session, placement, runtime -> {
+            ClientPlayerEntity current = MinecraftClient.getInstance().player;
+            if (current == null) {
+                return;
+            }
+            if (runtime.plan().size() == 0) {
+                Chat.error(Chat.tr("error.empty_schematic"));
+                return;
+            }
+            this.worldData.sessions.add(session);
+            this.focused = runtime;
+            this.promptedState = null;
+            this.farStorageWarned = false;
 
-        Chat.success(Chat.tr("info.session_created", session.id, session.name(), runtime.plan().size(), runtime.plan().doneCount()));
-        if (runtime.unsupported().isEmpty()) {
-            this.beginPreparation(session, player.isInCreativeMode());
-        } else {
-            // Asked in tickPreparation, before any inventory or storage step.
-            session.state = SessionState.CONFIRM_SKIPS;
+            Chat.success(Chat.tr("info.session_created", session.id, session.name(), runtime.plan().size(), runtime.plan().doneCount()));
+            if (runtime.unsupported().isEmpty()) {
+                this.beginPreparation(session, current.isInCreativeMode());
+            } else {
+                // Asked in tickPreparation, before any inventory or storage step.
+                session.state = SessionState.CONFIRM_SKIPS;
+            }
+            this.save();
+        });
+    }
+
+    /** Whether a schematic is being read in the background right now. */
+    public boolean isLoading() {
+        return this.loading != null && !this.loading.isDone();
+    }
+
+    /** True while a schematic is still being read; the player is asked to wait for it. */
+    private boolean stillLoading() {
+        if (this.loading != null && !this.loading.isDone()) {
+            Chat.warn(Chat.tr("error.loading_busy"));
+            return true;
         }
-        this.save();
+        return false;
+    }
+
+    /**
+     * Reads the schematic of a session on background threads, so the game keeps running even with huge schematics.
+     * {@code then} gets the runtime on the render thread, unless the world was left meanwhile.
+     */
+    private void loadSession(AgentSession session, SchematicPlacement placement, Consumer<SessionRuntime> then) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientWorld world = client.world;
+        String worldKey = this.worldKey;
+        long start = System.currentTimeMillis();
+        Chat.info(Chat.tr("info.loading", placement.getName()));
+        this.loading = SchematicLoader.load(client, placement, world, read -> SessionRuntime.create(session, placement, read, world))
+                .whenCompleteAsync((runtime, error) -> {
+                    if (!Objects.equals(worldKey, this.worldKey) || client.world != world) {
+                        return;
+                    }
+                    if (error != null) {
+                        LitematicaAgentClient.LOGGER.error("Could not read schematic {}", placement.getName(), error);
+                        Chat.error(Chat.tr("error.read_failed", placement.getName()));
+                        return;
+                    }
+                    Chat.info(Chat.tr("info.loaded", runtime.plan().size(),
+                            String.format(Locale.ROOT, "%.1f", (System.currentTimeMillis() - start) / 1000.0)));
+                    runLogged(() -> then.accept(runtime));
+                }, client);
+    }
+
+    /** Errors in a step that runs after background work would otherwise vanish inside the future. */
+    private static void runLogged(Runnable step) {
+        try {
+            step.run();
+        } catch (RuntimeException e) {
+            LitematicaAgentClient.LOGGER.error("Litematica Agent step after reading a schematic failed", e);
+            Chat.error(Chat.tr("reason.unknown"));
+        }
     }
 
     /**
@@ -813,14 +986,40 @@ public final class AgentManager {
             Chat.error(Chat.tr("error.no_placement"));
             return;
         }
-        SchematicAccess.SchematicReadResult read;
-        try {
-            // The same material list as a survival session of this schematic, e.g. dirt where grass would turn into
-            // dirt under a block, so the stocked chests hold exactly what the agent will look for.
-            read = SurvivalCheck.apply(SchematicAccess.readTargets(placement), client.world);
-        } catch (RuntimeException e) {
-            LitematicaAgentClient.LOGGER.error("Could not read schematic {}", placement.getName(), e);
-            Chat.error(Chat.tr("error.read_failed", placement.getName()));
+        if (this.stillLoading()) {
+            return;
+        }
+        // The same material list as a survival session of this schematic, e.g. dirt where grass would turn into dirt
+        // under a block, so the stocked chests hold exactly what the agent will look for. Read in the background.
+        ClientWorld world = client.world;
+        String worldKey = this.worldKey;
+        Chat.info(Chat.tr("info.loading", placement.getName()));
+        this.loading = SchematicLoader.load(client, placement, world, read -> read)
+                .whenCompleteAsync((read, error) -> {
+                    if (!Objects.equals(worldKey, this.worldKey) || client.world != world) {
+                        return;
+                    }
+                    if (error != null) {
+                        LitematicaAgentClient.LOGGER.error("Could not read schematic {}", placement.getName(), error);
+                        Chat.error(Chat.tr("error.read_failed", placement.getName()));
+                        return;
+                    }
+                    runLogged(() -> this.startStocking(read));
+                }, client);
+    }
+
+    private void startStocking(SchematicAccess.SchematicReadResult read) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientPlayerEntity player = client.player;
+        if (player == null || client.world == null) {
+            return;
+        }
+        if (this.agent != null || this.stockAgent != null) {
+            Chat.error(Chat.tr("error.agent_busy"));
+            return;
+        }
+        if (!player.isInCreativeMode()) {
+            Chat.error(Chat.tr("stock.creative_required"));
             return;
         }
         Map<Item, Integer> materials = new LinkedHashMap<>();
@@ -889,16 +1088,15 @@ public final class AgentManager {
             this.ensureLockScreen(MinecraftClient.getInstance());
             return;
         }
-        if (!this.focus(session)) {
-            return;
-        }
-        switch (session.state) {
-            case PAUSED, READY, BUILDING, SCANNING_STORAGE, CONFIRM_STORAGE -> this.beginBuilding(session);
-            default -> {
-                this.promptedState = null;
-                Chat.info(Chat.tr("info.preparation_continued", session.id));
+        this.focusThen(session, () -> {
+            switch (session.state) {
+                case PAUSED, READY, BUILDING, SCANNING_STORAGE, CONFIRM_STORAGE -> this.beginBuilding(session);
+                default -> {
+                    this.promptedState = null;
+                    Chat.info(Chat.tr("info.preparation_continued", session.id));
+                }
             }
-        }
+        });
     }
 
     public void begin(int id) {
@@ -914,10 +1112,7 @@ public final class AgentManager {
         if (this.activeSession() == session && session.state == SessionState.BUILDING) {
             return;
         }
-        if (!this.focus(session)) {
-            return;
-        }
-        this.beginBuilding(session);
+        this.focusThen(session, () -> this.beginBuilding(session));
     }
 
     /**
@@ -928,26 +1123,32 @@ public final class AgentManager {
         return state != SessionState.CONFIRM_SKIPS && state != SessionState.CHECK_INVENTORY;
     }
 
-    private boolean focus(AgentSession session) {
+    /**
+     * Makes the session the focused one and runs {@code then} once it is ready. A session that is not loaded yet is
+     * read in the background first; {@code then} runs on the render thread afterwards.
+     */
+    private void focusThen(AgentSession session, Runnable then) {
         if (this.focused != null && this.focused.session() == session) {
-            return true;
+            then.run();
+            return;
         }
-        MinecraftClient client = MinecraftClient.getInstance();
         Optional<SchematicPlacement> placement = SchematicAccess.find(session.placement);
         if (placement.isEmpty()) {
             Chat.error(Chat.tr("error.placement_missing", session.id, session.name()));
-            return false;
+            return;
+        }
+        if (this.stillLoading()) {
+            return;
         }
         this.pauseActiveForSwitch();
-        try {
-            this.focused = SessionRuntime.load(session, placement.get(), client.world);
-        } catch (RuntimeException e) {
-            LitematicaAgentClient.LOGGER.error("Could not read schematic {}", session.name(), e);
-            Chat.error(Chat.tr("error.read_failed", session.name()));
-            return false;
-        }
-        this.promptedState = null;
-        return true;
+        this.loadSession(session, placement.get(), runtime -> {
+            if (this.findSession(session.id) != session) {
+                return;
+            }
+            this.focused = runtime;
+            this.promptedState = null;
+            then.run();
+        });
     }
 
     private void beginBuilding(AgentSession session) {
@@ -958,10 +1159,14 @@ public final class AgentManager {
         double distance = SchematicAccess.distanceTo(this.focused.placement(), client.player.getEntityPos());
         boolean useHome = distance > this.config.maxStartDistance;
         if (useHome && this.worldData.buildHomeCommand.isEmpty()) {
-            Chat.error(Chat.tr("error.too_far", (int) distance, this.config.maxStartDistance));
+            if (!this.autoRetryProbing) {
+                // A quiet retry while the player is away (fetching material, say) simply waits for the next one.
+                Chat.error(Chat.tr("error.too_far", (int) distance, this.config.maxStartDistance));
+            }
             return;
         }
-        this.focused.refreshFromWorld(client.world);
+        // No full comparison with the world here, it would stall the game with a huge schematic: the agent keeps
+        // checking every target against the world a slice per tick.
         if (this.agent == null || this.agent.runtime() != this.focused) {
             if (this.agent != null) {
                 this.agent.suspend();
@@ -976,9 +1181,13 @@ public final class AgentManager {
         if (useHome) {
             this.agent.travelHome(this.worldData.buildHomeCommand);
         }
-        Chat.success(Chat.tr("info.building_started", session.id, session.name()));
         this.save();
-        client.setScreen(new AgentLockScreen());
+        // A quiet auto-retry probe (see tryAutoRecover) must not announce itself or yank the screen back open before
+        // knowing whether the attempt actually sticks - ensureLockScreen() reopens it on its own once it does.
+        if (!this.autoRetryProbing) {
+            Chat.success(Chat.tr("info.building_started", session.id, session.name()));
+            client.setScreen(new AgentLockScreen());
+        }
     }
 
     /**
@@ -1032,12 +1241,64 @@ public final class AgentManager {
             target.runtime().updateCounters();
         }
         this.save();
+        // Reasons the player can fix in the world (missing material, a wrong block, a missing tool, ...) get quietly
+        // retried instead of needing an explicit "Weiter" click; see tryAutoRecover(). A voluntary pause or a fatal
+        // one (died, emergency) is never retried on its own.
+        boolean repeat = this.autoRetryCycle && reason.equals(this.autoRetryPrevReason) && args.equals(this.autoRetryPrevArgs);
+        this.autoRetryCycle = false;
+        if (NO_AUTO_RETRY_REASONS.contains(reason)) {
+            this.nextAutoRetryMillis = Long.MAX_VALUE;
+        } else {
+            // A new problem is looked at again soon; the same one again keeps the longer wait tryAutoRecover set up.
+            if (!repeat) {
+                this.autoRetryDelayMillis = AUTO_RETRY_INTERVAL_MILLIS;
+            }
+            this.nextAutoRetryMillis = System.currentTimeMillis() + this.autoRetryDelayMillis;
+        }
+        // While auto-retrying, hitting the same problem again is expected and not worth repeating in chat; the lock
+        // screen shows the current details anyway.
+        if (repeat) {
+            return;
+        }
         if (reason.isEmpty()) {
             Chat.info(Chat.tr("info.paused", session.id).append(" ").append(this.resumeButton(session)));
         } else {
             Chat.warn(Chat.tr("info.paused_reason", session.id, Chat.trList(reason, args))
                     .append(" ").append(this.resumeButton(session)));
         }
+    }
+
+    /**
+     * While a session is paused for a reason the player can resolve in the world (missing material now scanned, a
+     * wrong block broken by hand, a tool added, health restored, ...), this quietly tries to continue every few
+     * seconds instead of requiring an explicit "Weiter" click. The lock screen itself is not force-opened here: it
+     * reappears through the normal {@link #ensureLockScreen} path only once the retry actually keeps the session
+     * building, so the player is left alone in the world for as long as the problem persists.
+     */
+    private void tryAutoRecover(MinecraftClient client) {
+        if (this.agent == null) {
+            return;
+        }
+        AgentSession session = this.agent.session();
+        if (session == null || session.state != SessionState.PAUSED
+                || NO_AUTO_RETRY_REASONS.contains(session.pauseReason)) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now < this.nextAutoRetryMillis) {
+            return;
+        }
+        // Scheduled before trying, and backing off with every try: a try that ends without a new pause (the player
+        // walked too far away to start from here) must not run again on the very next tick.
+        this.nextAutoRetryMillis = now + this.autoRetryDelayMillis;
+        this.autoRetryDelayMillis = Math.min(MAX_AUTO_RETRY_INTERVAL_MILLIS, this.autoRetryDelayMillis * 2);
+        this.autoRetryProbing = true;
+        this.autoRetryPrevReason = session.pauseReason;
+        this.autoRetryPrevArgs = List.copyOf(session.pauseArgs);
+        // autoRetryProbing (no chat, no screen while resuming) is only cleared at the end of tick(client): a re-pause
+        // often happens in the agent.tick() call right after this method returns, still within the same tick.
+        this.resume(session.id);
+        this.autoRetryCycle = true;
     }
 
     public void pauseActive() {
@@ -1118,6 +1379,13 @@ public final class AgentManager {
     void complete(BuildAgent finished) {
         MinecraftClient client = MinecraftClient.getInstance();
         AgentSession session = finished.session();
+        if (finished.runtime() != null && !finished.runtime().unsupported().isEmpty()) {
+            // A filtered plan may be done while source blocks were omitted or substituted. Keep the session
+            // reviewable and resumable; never announce that the entire original schematic was completed.
+            this.pause(finished, "pause.schematic_incomplete",
+                    List.of(String.valueOf(finished.runtime().unsupported().size())));
+            return;
+        }
         finished.suspend();
         if (this.agent == finished) {
             this.agent = null;
@@ -1183,6 +1451,10 @@ public final class AgentManager {
             case "interrupted" -> "interrupted";
             case "timeout" -> "timeout";
             case "cancelled" -> "cancelled";
+            case "no_water_bucket", "no_water_source", "refill_failed", "no_empty_bucket" -> "no_water";
+            case "water_not_placed" -> "water_not_placed";
+            case "waiting_for_water" -> "waiting_for_water";
+            case "no_air" -> "no_air";
             default -> "unknown";
         };
     }
@@ -1240,15 +1512,14 @@ public final class AgentManager {
         if (session == null || session.state != SessionState.CONFIRM_STORAGE) {
             return;
         }
-        if (!this.focus(session)) {
-            return;
-        }
-        if (this.allMaterialsFound()) {
-            this.setState(session, SessionState.READY);
-        } else {
-            Chat.warn(Chat.tr("prepare.storage_incomplete"));
-            this.setState(session, SessionState.SCANNING_STORAGE);
-        }
+        this.focusThen(session, () -> {
+            if (this.allMaterialsFound()) {
+                this.setState(session, SessionState.READY);
+            } else {
+                Chat.warn(Chat.tr("prepare.storage_incomplete"));
+                this.setState(session, SessionState.SCANNING_STORAGE);
+            }
+        });
     }
 
     public void storageRescan(@Nullable Integer id) {
@@ -1259,8 +1530,8 @@ public final class AgentManager {
             return;
         }
         AgentSession session = this.findSession(id);
-        if (session != null && session.state.isPreparation() && this.focus(session)) {
-            this.setState(session, SessionState.SCANNING_STORAGE);
+        if (session != null && session.state.isPreparation()) {
+            this.focusThen(session, () -> this.setState(session, SessionState.SCANNING_STORAGE));
         }
     }
 

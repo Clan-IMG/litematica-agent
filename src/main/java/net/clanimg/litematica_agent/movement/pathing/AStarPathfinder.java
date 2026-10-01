@@ -163,7 +163,9 @@ public final class AStarPathfinder {
         }
 
         if (inWater) {
-            if (this.canOccupy(x, y + 1, z)) {
+            // Only up through water: a swimmer's feet stay in the top water block, it cannot hover in the air above it.
+            // From there it climbs out onto a block one higher (ASCEND), not two.
+            if (this.has(x, y + 1, z, NavWorld.WATER) && this.canOccupy(x, y + 1, z)) {
                 out.add(new Step(x, y + 1, z, MoveType.SWIM_UP, COST_CLIMB * COST_WATER_FACTOR));
             }
             if (this.has(x, y - 1, z, NavWorld.WATER) && this.canOccupy(x, y - 1, z)) {
@@ -277,7 +279,26 @@ public final class AStarPathfinder {
                 || ((feet | head) & (NavWorld.DANGER | NavWorld.UNLOADED)) != 0) {
             return false;
         }
+        if ((feet & NavWorld.WATER) != 0 && (head & NavWorld.WATER) != 0 && !this.airAbove(x, y + 2, z)) {
+            // Under water with a roof above: no way up for air - a pond under a floating island drowns the player
+            // that takes the short cut through it.
+            return false;
+        }
         return (feet & NavWorld.RAISED) == 0 || this.isPassable(x, y + 2, z);
+    }
+
+    /** Whether swimming straight up from here reaches air within a few blocks, rather than a roof. */
+    private boolean airAbove(int x, int y, int z) {
+        for (int dy = 0; dy < 4; dy++) {
+            int flags = this.flags(x, y + dy, z);
+            if ((flags & NavWorld.PASSABLE) == 0 || (flags & (NavWorld.DANGER | NavWorld.UNLOADED)) != 0) {
+                return false;
+            }
+            if ((flags & NavWorld.WATER) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isSupported(int x, int y, int z) {

@@ -56,6 +56,7 @@ public class HomeTravelGameTest implements FabricClientGameTest {
                 AgentManager.get().worldData().buildHomeCommand = "tp @s 3 -60 3";
                 AgentManager.get().startNew();
             });
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(10);
             int sessionId = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
 
@@ -81,6 +82,7 @@ public class HomeTravelGameTest implements FabricClientGameTest {
             // The test opened the chest itself without looking at it; only the agent's clicks count.
             GameTestSupport.resetRotationCheck();
             context.runOnClient(client -> AgentManager.get().begin(sessionId));
+            GameTestSupport.awaitLoading(context);
             AgentSession paused = GameTestSupport.waitForAgent(context, sessionId, 20 * 60 * 4);
             context.takeScreenshot("home-01-finished");
             if (paused != null) {

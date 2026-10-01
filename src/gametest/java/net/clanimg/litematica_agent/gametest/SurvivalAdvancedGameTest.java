@@ -49,6 +49,8 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
             context.waitTicks(10);
 
             context.runOnClient(client -> AgentManager.get().startNew());
+
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(10);
             int towerSession = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
             scanChest(context);
@@ -57,6 +59,7 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
             // The test opened the chest itself without looking at it; only the agent's clicks count.
             GameTestSupport.resetRotationCheck();
             context.runOnClient(client -> AgentManager.get().begin(towerSession));
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(200);
             // Make the player hungry in the middle of the build: the agent has to eat by itself.
             server.runOnServer(minecraftServer -> minecraftServer.getPlayerManager().getPlayerList()
@@ -101,12 +104,15 @@ public class SurvivalAdvancedGameTest implements FabricClientGameTest {
             server.runCommand("setblock 11 -60 3 oak_planks");
             context.waitTicks(10);
             context.runOnClient(client -> AgentManager.get().startNew());
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(10);
             int floorSession = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
             context.waitFor(client -> state(floorSession) == SessionState.CONFIRM_STORAGE, 100);
             context.runOnClient(client -> AgentManager.get().storageKeep(floorSession));
+            GameTestSupport.awaitLoading(context);
             context.waitFor(client -> state(floorSession) == SessionState.READY, 100);
             context.runOnClient(client -> AgentManager.get().begin(floorSession));
+            GameTestSupport.awaitLoading(context);
             AgentSession wrong = GameTestSupport.waitForAgent(context, floorSession, 20 * 60 * 2);
             if (wrong == null || !"pause.wrong_block".equals(wrong.pauseReason)) {
                 throw new AssertionError("Expected a wrong-block pause but got " + (wrong == null ? "completion" : wrong.pauseReason));

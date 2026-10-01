@@ -1,5 +1,6 @@
 package net.clanimg.litematica_agent.planning;
 
+import net.clanimg.litematica_agent.placement.WaterPlacement;
 import net.minecraft.block.AbstractBannerBlock;
 import net.minecraft.block.AbstractPressurePlateBlock;
 import net.minecraft.block.AbstractRailBlock;
@@ -31,7 +32,8 @@ import net.minecraft.world.BlockView;
 
 /**
  * Order of placement inside one layer. Redstone is placed after its supports, power sources come last so circuits
- * do not fire while they are still incomplete.
+ * do not fire while they are still incomplete. Water follows once the layer's walls stand, so it stays where it
+ * belongs; blocks that live in water are placed into it last and come out waterlogged by themselves.
  */
 public enum BuildCategory {
     SOLID,
@@ -39,9 +41,17 @@ public enum BuildCategory {
     ATTACHED,
     REDSTONE,
     ACTUATOR,
-    POWER_SOURCE;
+    POWER_SOURCE,
+    FLUID,
+    AQUATIC;
 
     public static BuildCategory classify(BlockState state, BlockView world, BlockPos pos) {
+        if (WaterPlacement.isWaterTarget(state)) {
+            return FLUID;
+        }
+        if (WaterPlacement.needsWater(state) || WaterPlacement.placedOnWater(state)) {
+            return AQUATIC;
+        }
         Block block = state.getBlock();
         if (block instanceof RedstoneTorchBlock || block instanceof LeverBlock || block instanceof DaylightDetectorBlock
                 || block instanceof SculkSensorBlock || block instanceof LightningRodBlock

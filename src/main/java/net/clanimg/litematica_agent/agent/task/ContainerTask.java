@@ -16,7 +16,6 @@ import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.LinkedHashMap;
@@ -49,6 +48,7 @@ public final class ContainerTask implements AgentTask {
     }
 
     private static final int OPEN_TIMEOUT = 40;
+    private static final int MAX_VISIT_TICKS = 20 * 90;
 
     private final Mode mode;
     private final List<Visit> visits;
@@ -64,6 +64,17 @@ public final class ContainerTask implements AgentTask {
     private int openAttempts;
     private String failure = "";
     private int unreachable;
+    private int visitTicks;
+    /** Ticks spent on journeys to far-off chests; they extend the task's time limit by exactly that. */
+    private int travelTicks;
+    private int approachAttempts;
+    private int aimAttempts;
+    private int transferFailures;
+    private @Nullable ContainerRecord homeRequired;
+    private @Nullable String pendingItem;
+    private int pendingInventoryCount;
+    private int pendingTicks;
+    private boolean transferredAny;
 
     public ContainerTask(Mode mode, List<Visit> visits) {
         this.mode = mode;
@@ -72,6 +83,16 @@ public final class ContainerTask implements AgentTask {
 
     public Mode mode() {
         return this.mode;
+    }
+
+    /** The caller pauses once with concrete home setup instructions after this task finishes. */
+    public @Nullable ContainerRecord homeRequired() {
+        // A failed optional lookahead chest must not stop work supplied by another successful visit.
+        return this.transferredAny ? null : this.homeRequired;
+    }
+
+    public boolean transferredAny() {
+        return this.transferredAny;
     }
 
     @Override
@@ -85,44 +106,89 @@ public final class ContainerTask implements AgentTask {
         ClientPlayerEntity player = agent.player();
         agent.setHeldSneak(false);
         this.timer++;
+        // The journey to a far-off chest (a plot of hundreds of blocks) has its own limit in the approach; the visit's
+        // and the route's budgets are for the last stretch, the search for a stand spot and the chest itself.
+        boolean travelling = this.phase == Phase.APPROACH && this.approach != null && this.approach.travelling();
+        if (travelling) {
+            this.travelTicks++;
+            this.timer = 0;
+        } else if (++this.visitTicks > MAX_VISIT_TICKS) {
+            this.unreachable++;
+            this.failure = "container_visit_timeout:" + this.phase;
+            if (this.phase == Phase.APPROACH || this.phase == Phase.HOME) {
+                this.homeRequired = container;
+            }
+            agent.markContainerUnreachable(container.key());
+            this.nextVisit(agent, true);
+            return Result.RUNNING;
+        }
 
         switch (this.phase) {
             case TRAVEL -> {
                 if (!container.dimension.equals(agent.dimensionId())) {
-                    this.nextVisit(agent, true);
+                    String command = agent.storageHomeCommand(container);
+                    if (!this.homeUsed && !command.isEmpty()) {
+                        this.remaining = new LinkedHashMap<>(visit.items());
+                        this.home = new HomeStep(command, container.dimension, pos);
+                        this.next(Phase.HOME);
+                    } else {
+                        this.unreachable++;
+                        this.failure = "container_wrong_dimension";
+                        this.homeRequired = container;
+                        this.nextVisit(agent, true);
+                    }
                     return Result.RUNNING;
                 }
                 this.remaining = new LinkedHashMap<>(visit.items());
-                String homeCommand = agent.storageHomeCommand();
-                double distance = player.getEntityPos().distanceTo(Vec3d.ofCenter(pos));
-                if (!this.homeUsed && !homeCommand.isEmpty() && distance > agent.config().homeDistance) {
-                    this.home = new HomeStep(homeCommand);
-                    this.next(Phase.HOME);
-                } else {
-                    this.approach = new Approach(pos);
-                    this.next(Phase.APPROACH);
-                }
+                // Always try the ordinary route before using the saved fallback.
+                this.approach = new Approach(pos);
+                this.next(Phase.APPROACH);
             }
             case HOME -> {
                 HomeStep.State state = this.home.tick(agent);
                 if (state != HomeStep.State.RUNNING) {
                     this.homeUsed = true;
+                    if (state == HomeStep.State.FAILED) {
+                        this.failure = "storage_home_failed";
+                    }
                     this.approach = new Approach(pos);
                     this.next(Phase.APPROACH);
                 }
             }
             case APPROACH -> {
+                if (this.timer > 20 * 35) {
+                    String command = agent.storageHomeCommand(container);
+                    agent.movement().stop();
+                    if (!this.homeUsed && !command.isEmpty()) {
+                        this.home = new HomeStep(command, container.dimension, pos);
+                        this.next(Phase.HOME);
+                    } else {
+                        this.unreachable++;
+                        this.failure = "container_route_timeout";
+                        this.homeRequired = container;
+                        agent.markContainerUnreachable(container.key());
+                        this.nextVisit(agent, true);
+                    }
+                    return Result.RUNNING;
+                }
                 Approach.State state = this.approach.tick(agent);
                 if (state == Approach.State.READY) {
                     this.next(Phase.AIM);
                 } else if (state == Approach.State.FAILED) {
-                    String homeCommand = agent.storageHomeCommand();
+                    String homeCommand = agent.storageHomeCommand(container);
+                    if (!this.homeUsed && ++this.approachAttempts < 2) {
+                        this.approach = new Approach(pos);
+                        return Result.RUNNING;
+                    }
                     if (!this.homeUsed && !homeCommand.isEmpty()) {
-                        this.home = new HomeStep(homeCommand);
+                        this.home = new HomeStep(homeCommand, container.dimension, pos);
                         this.next(Phase.HOME);
                     } else {
                         this.unreachable++;
                         this.failure = "container_unreachable:" + this.approach.failure();
+                        this.homeRequired = container;
+                        // So the next restock does not just plan a visit to the same unreachable chest again.
+                        agent.markContainerUnreachable(container.key());
                         this.nextVisit(agent, true);
                     }
                 }
@@ -131,6 +197,13 @@ public final class ContainerTask implements AgentTask {
                 InventoryHelper.selectNeutralSlot(player);
                 Aiming.Aim aim = Aiming.aimAt(player, pos, player.getEyePos(), agent.reach());
                 if (aim == null) {
+                    if (++this.aimAttempts > 3) {
+                        this.unreachable++;
+                        this.failure = "container_no_line_of_sight";
+                        agent.markContainerUnreachable(container.key());
+                        this.nextVisit(agent, true);
+                        return Result.RUNNING;
+                    }
                     this.approach = new Approach(pos);
                     this.next(Phase.APPROACH);
                     return Result.RUNNING;
@@ -148,6 +221,13 @@ public final class ContainerTask implements AgentTask {
                     agent.rotation().setTarget(aim.yaw(), aim.pitch());
                 }
                 if (this.phase == Phase.AIM && this.timer > 40) {
+                    if (++this.aimAttempts > 3) {
+                        this.unreachable++;
+                        this.failure = "container_aim_failed";
+                        agent.markContainerUnreachable(container.key());
+                        this.nextVisit(agent, true);
+                        return Result.RUNNING;
+                    }
                     this.next(Phase.APPROACH);
                     this.approach = new Approach(pos);
                 }
@@ -166,6 +246,7 @@ public final class ContainerTask implements AgentTask {
                     if (this.openAttempts > 2) {
                         this.unreachable++;
                         this.failure = "container_not_opened";
+                        agent.markContainerUnreachable(container.key());
                         this.nextVisit(agent, true);
                     } else {
                         this.next(Phase.AIM);
@@ -175,11 +256,42 @@ public final class ContainerTask implements AgentTask {
             case TRANSFER -> {
                 if (!(agent.client().currentScreen instanceof HandledScreen<?> screen) || screen.getScreenHandler() != this.handler) {
                     agent.setOperatingContainer(false);
+                    this.pendingItem = null;
+                    if (++this.openAttempts > 2) {
+                        this.unreachable++;
+                        this.failure = "container_closed_during_transfer";
+                        this.nextVisit(agent, true);
+                        return Result.RUNNING;
+                    }
                     this.next(Phase.AIM);
                     return Result.RUNNING;
                 }
                 if (this.timer == 1) {
                     agent.syncContainer(container, this.handler);
+                }
+                if (this.pendingItem != null) {
+                    this.pendingTicks++;
+                    if (this.pendingTicks < Math.max(4, agent.config().containerClickDelayTicks())) {
+                        return Result.RUNNING;
+                    }
+                    int current = inventoryCount(player, this.pendingItem);
+                    int moved = this.mode == Mode.WITHDRAW ? current - this.pendingInventoryCount
+                            : this.pendingInventoryCount - current;
+                    if (moved > 0) {
+                        this.transferredAny = true;
+                        this.remaining.merge(this.pendingItem, -moved, Integer::sum);
+                        this.pendingItem = null;
+                        this.transferFailures = 0;
+                    } else if (this.pendingTicks > OPEN_TIMEOUT) {
+                        this.pendingItem = null;
+                        if (++this.transferFailures >= 3) {
+                            this.failure = "container_transfer_rejected";
+                            this.unreachable++;
+                            agent.markContainerUnreachable(container.key());
+                            this.next(Phase.CLOSE);
+                        }
+                    }
+                    return Result.RUNNING;
                 }
                 if (--this.clickCooldown > 0) {
                     return Result.RUNNING;
@@ -208,9 +320,6 @@ public final class ContainerTask implements AgentTask {
     }
 
     private boolean withdrawOne(BuildAgent agent, ClientPlayerEntity player, ContainerRecord container) {
-        if (InventoryHelper.freeSlots(player.getInventory()) == 0) {
-            return false;
-        }
         for (Map.Entry<String, Integer> entry : this.remaining.entrySet()) {
             if (entry.getValue() <= 0) {
                 continue;
@@ -224,6 +333,9 @@ public final class ContainerTask implements AgentTask {
                 if (!itemId(stack).equals(entry.getKey())) {
                     continue;
                 }
+                if (!canAccept(player, stack)) {
+                    continue;
+                }
                 if (stack.isDamageable() && InventoryHelper.remainingDurability(stack) <= agent.config().toolDurabilityReserve) {
                     continue;
                 }
@@ -235,9 +347,8 @@ public final class ContainerTask implements AgentTask {
                 entry.setValue(0);
                 continue;
             }
-            int count = best.getStack().getCount();
+            this.beginTransfer(player, entry.getKey());
             agent.interactionManager().clickSlot(this.handler.syncId, best.id, 0, SlotActionType.QUICK_MOVE, player);
-            entry.setValue(entry.getValue() - count);
             return true;
         }
         return false;
@@ -254,15 +365,37 @@ public final class ContainerTask implements AgentTask {
             if (amount == null || amount <= 0) {
                 continue;
             }
-            ItemStack before = stack.copy();
+            this.beginTransfer(player, id);
             agent.interactionManager().clickSlot(this.handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE, player);
-            if (ItemStack.areEqual(before, slot.getStack())) {
-                // Container is full: nothing moved.
-                this.remaining.put(id, 0);
-                continue;
-            }
-            this.remaining.put(id, amount - before.getCount());
             return true;
+        }
+        return false;
+    }
+
+    private void beginTransfer(ClientPlayerEntity player, String item) {
+        this.pendingItem = item;
+        this.pendingInventoryCount = inventoryCount(player, item);
+        this.pendingTicks = 0;
+    }
+
+    private static int inventoryCount(ClientPlayerEntity player, String item) {
+        int count = 0;
+        for (int i = 0; i < InventoryHelper.MAIN_SIZE; i++) {
+            ItemStack stack = player.getInventory().getStack(i);
+            if (!stack.isEmpty() && itemId(stack).equals(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private static boolean canAccept(ClientPlayerEntity player, ItemStack incoming) {
+        for (int i = 0; i < InventoryHelper.MAIN_SIZE; i++) {
+            ItemStack current = player.getInventory().getStack(i);
+            if (current.isEmpty() || ItemStack.areItemsAndComponentsEqual(current, incoming)
+                    && current.getCount() < current.getMaxCount()) {
+                return true;
+            }
         }
         return false;
     }
@@ -284,21 +417,26 @@ public final class ContainerTask implements AgentTask {
     }
 
     private void nextVisit(BuildAgent agent, boolean skipped) {
+        agent.movement().stop();
+        if (this.handler != null && agent.client().currentScreen instanceof HandledScreen<?>) {
+            agent.player().closeHandledScreen();
+        }
         agent.setOperatingContainer(false);
         this.visitIndex++;
         this.handler = null;
         this.openAttempts = 0;
+        this.visitTicks = 0;
+        this.approachAttempts = 0;
+        this.aimAttempts = 0;
+        this.transferFailures = 0;
+        this.pendingItem = null;
+        this.homeUsed = false;
         this.next(Phase.TRAVEL);
     }
 
     private void next(Phase phase) {
         this.phase = phase;
         this.timer = 0;
-    }
-
-    private Result fail(String reason) {
-        this.failure = reason;
-        return Result.FAILED;
     }
 
     static String itemId(ItemStack stack) {
@@ -330,16 +468,7 @@ public final class ContainerTask implements AgentTask {
     }
 
     @Override
-    public @Nullable BlockPos focus() {
-        if (this.visitIndex >= this.visits.size()) {
-            return null;
-        }
-        ContainerRecord container = this.visits.get(this.visitIndex).container();
-        return new BlockPos(container.x, container.y, container.z);
-    }
-
-    @Override
     public int timeoutTicks() {
-        return 20 * 60 * Math.max(1, this.visits.size()) + 20 * 60;
+        return MAX_VISIT_TICKS * Math.max(1, this.visits.size()) + 20 * 10 + this.travelTicks;
     }
 }

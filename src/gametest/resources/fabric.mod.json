@@ -6,12 +6,20 @@
   "environment": "client",
   "entrypoints": {
     "fabric-client-gametest": [
+      "net.clanimg.litematica_agent.gametest.AgentLockScreenGameTest",
       "net.clanimg.litematica_agent.gametest.StockGameTest",
       "net.clanimg.litematica_agent.gametest.HomeTravelGameTest",
       "net.clanimg.litematica_agent.gametest.CreativeBuildGameTest",
       "net.clanimg.litematica_agent.gametest.SurvivalBuildGameTest",
       "net.clanimg.litematica_agent.gametest.SessionManagementGameTest",
-      "net.clanimg.litematica_agent.gametest.SurvivalAdvancedGameTest"
+      "net.clanimg.litematica_agent.gametest.SurvivalAdvancedGameTest",
+      "net.clanimg.litematica_agent.gametest.WarehouseGameTest",
+      "net.clanimg.litematica_agent.gametest.WaterBuildGameTest",
+      "net.clanimg.litematica_agent.gametest.FloatingIslandGameTest",
+      "net.clanimg.litematica_agent.gametest.SchildkroeteSurvivalGameTest",
+      "net.clanimg.litematica_agent.gametest.AquaticPreflightGameTest",
+      "net.clanimg.litematica_agent.gametest.QuickStartGameTest",
+      "net.clanimg.litematica_agent.gametest.HugeSchematicGameTest"
     ]
   },
   "depends": {

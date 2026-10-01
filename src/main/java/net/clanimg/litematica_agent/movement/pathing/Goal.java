@@ -45,6 +45,30 @@ public interface Goal {
         };
     }
 
+    /**
+     * Any feet position within {@code radius} of the point horizontally, at whatever height is reachable: for getting
+     * near a far-off part of the build (its chunks load by column), where the target's own height may lie in a void
+     * or inside the ground.
+     */
+    static Goal column(double px, double pz, double radius) {
+        double radiusSq = radius * radius;
+        return new Goal() {
+            @Override
+            public boolean isGoal(int x, int y, int z) {
+                double dx = x + 0.5 - px;
+                double dz = z + 0.5 - pz;
+                return dx * dx + dz * dz <= radiusSq;
+            }
+
+            @Override
+            public double heuristic(int x, int y, int z) {
+                double dx = x + 0.5 - px;
+                double dz = z + 0.5 - pz;
+                return Math.max(0.0, Math.sqrt(dx * dx + dz * dz) - radius);
+            }
+        };
+    }
+
     static Goal anyOf(Collection<Goal> goals) {
         List<Goal> list = List.copyOf(goals);
         return new Goal() {

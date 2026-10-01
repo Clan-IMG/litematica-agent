@@ -11,7 +11,6 @@ import net.minecraft.block.BlockState;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.math.BlockPos;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -166,10 +165,5 @@ public final class InteractTask implements AgentTask {
     @Override
     public String failureReason() {
         return this.failure;
-    }
-
-    @Override
-    public BlockPos focus() {
-        return this.target.pos();
     }
 }

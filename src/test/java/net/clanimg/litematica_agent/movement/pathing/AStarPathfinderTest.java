@@ -71,6 +71,43 @@ class AStarPathfinderTest {
     }
 
     @Test
+    void cannotSwimOutOfShallowWaterOverATwoBlockWall() {
+        // A basin one block deep with walls two blocks high: a swimmer cannot hover above the water and jump out.
+        TestWorld world = basin(1);
+        PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(3, FEET + 2, 0),
+                PathOptions.walking().withMaxNodes(5_000));
+        assertFalse(result.reachedGoal(), () -> "path: " + result.nodes());
+    }
+
+    @Test
+    void swimsUpAndClimbsOutOfDeepWater() {
+        // Two blocks of water: swim to the top water block, then climb onto the wall, one block higher.
+        TestWorld world = basin(2);
+        PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(3, FEET + 2, 0), PathOptions.walking());
+        assertTrue(result.reachedGoal(), () -> "path: " + result.nodes());
+        // The last step leaves the top water block for the wall top right next to it.
+        PathNode beforeLast = result.nodes().get(result.nodes().size() - 2);
+        assertEquals(FEET + 1, beforeLast.y(), () -> "path: " + result.nodes());
+    }
+
+    /** Water from x/z -2..2 with the given depth, surrounded by a two-block stone wall on the floor. */
+    private static TestWorld basin(int depth) {
+        TestWorld world = new TestWorld(FLOOR)
+                .wall(-3, -3, 3, -3, FEET, FEET + 1)
+                .wall(-3, 3, 3, 3, FEET, FEET + 1)
+                .wall(-3, -3, -3, 3, FEET, FEET + 1)
+                .wall(3, -3, 3, 3, FEET, FEET + 1);
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                for (int y = FEET; y < FEET + depth; y++) {
+                    world.set(x, y, z, NavWorld.PASSABLE | NavWorld.WATER);
+                }
+            }
+        }
+        return world;
+    }
+
+    @Test
     void cannotClimbTwoBlockWallWithoutHelpers() {
         TestWorld world = new TestWorld(FLOOR).wall(3, -20, 20, 20, FEET, FEET + 1);
         PathResult result = new AStarPathfinder(world).find(0, FEET, 0, Goal.block(6, FEET + 2, 0),

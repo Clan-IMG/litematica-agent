@@ -71,6 +71,23 @@ public final class Aiming {
     }
 
     /**
+     * Where the crosshair enters the still empty cell at {@code pos}, for a click into that cell (see
+     * {@link net.clanimg.litematica_agent.placement.PlacementSolver#setAllowAirPlacement}): the hit on the cell's
+     * face, or null when the crosshair misses the cell or something real is in the way.
+     */
+    public static @Nullable BlockHitResult airHit(ClientPlayerEntity player, World world, BlockPos pos, double reach) {
+        Vec3d eye = player.getEyePos();
+        Vec3d end = eye.add(player.getRotationVec(1.0F).multiply(reach));
+        BlockHitResult hit = Box.raycast(java.util.List.of(new Box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)), eye, end, pos);
+        if (hit == null || hit.getType() != HitResult.Type.BLOCK) {
+            return null;
+        }
+        BlockHitResult real = world.raycast(new RaycastContext(eye, hit.getPos(), RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE, player));
+        return real.getType() == HitResult.Type.BLOCK ? null : hit;
+    }
+
+    /**
      * Whether the hit lies on its face with some distance to the edges of the block. The server sees the eye a tiny
      * bit elsewhere (the client does not send very small movements), so a click right at an edge may miss the block
      * there, and anti-cheats flag it.

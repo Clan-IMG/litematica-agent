@@ -3,6 +3,7 @@ package net.clanimg.litematica_agent.persistence;
 import net.clanimg.litematica_agent.agent.AgentSession;
 import net.clanimg.litematica_agent.agent.BuildStrategy;
 import net.clanimg.litematica_agent.storage.ContainerRecord;
+import net.clanimg.litematica_agent.storage.StorageHomes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +17,7 @@ public final class WorldData {
     public List<ContainerRecord> storage = new ArrayList<>();
     /** Server command (without slash) that brings the player to the storage, e.g. {@code home lager}. */
     public String storageHomeCommand = "";
+    public List<StorageHomes.Route> storageHomes = new ArrayList<>();
     /** Server command (without slash) that brings the player back to the build site. */
     public String buildHomeCommand = "";
 
@@ -28,6 +30,15 @@ public final class WorldData {
         }
         if (this.storageHomeCommand == null) {
             this.storageHomeCommand = "";
+        }
+        if (this.storageHomes == null) {
+            this.storageHomes = new ArrayList<>();
+        }
+        this.storageHomes.removeIf(route -> route == null || route.dimension == null);
+        for (StorageHomes.Route route : this.storageHomes) {
+            if (route.command == null) {
+                route.command = "";
+            }
         }
         if (this.buildHomeCommand == null) {
             this.buildHomeCommand = "";

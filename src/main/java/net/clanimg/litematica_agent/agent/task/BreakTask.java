@@ -2,6 +2,8 @@ package net.clanimg.litematica_agent.agent.task;
 
 import net.clanimg.litematica_agent.agent.BuildAgent;
 import net.clanimg.litematica_agent.inventory.InventoryHelper;
+import net.clanimg.litematica_agent.movement.MovementController;
+import net.clanimg.litematica_agent.movement.pathing.Goal;
 import net.clanimg.litematica_agent.placement.Aiming;
 import net.clanimg.litematica_agent.ui.Chat;
 import net.minecraft.block.BlockState;
@@ -20,10 +22,16 @@ public final class BreakTask implements AgentTask {
     private enum Phase {
         APPROACH,
         AIM,
-        MINE
+        MINE,
+        COLLECT
     }
 
     private static final int MINE_TIMEOUT = 20 * 30;
+    private static final int MAX_REAIMS = 8;
+    /** How long to wait near a just-mined block for the drop to be swept up once the agent stopped approaching it. */
+    private static final int COLLECT_SETTLE_TICKS = 6;
+    /** Upper bound while still walking toward the drop, in case it is further away than expected. */
+    private static final int COLLECT_TIMEOUT_TICKS = 15;
 
     private final int index;
     private final BlockPos pos;
@@ -31,6 +39,7 @@ public final class BreakTask implements AgentTask {
     private Phase phase = Phase.APPROACH;
     private @Nullable Aiming.Aim aim;
     private int timer;
+    private int reaims;
     private boolean started;
     private String failure = "";
 
@@ -57,9 +66,16 @@ public final class BreakTask implements AgentTask {
         agent.setHeldSneak(false);
         this.timer++;
         BlockState state = agent.world().getBlockState(this.pos);
-        if (state.isAir() || state.getOutlineShape(agent.world(), this.pos).isEmpty()) {
+        if (this.phase != Phase.COLLECT && (state.isAir() || state.getOutlineShape(agent.world(), this.pos).isEmpty())) {
             agent.onBlockRemoved(this.pos);
-            return Result.SUCCESS;
+            if (this.started && !player.isInCreativeMode()) {
+                // Walk to the drop so it is not simply left behind; someone else grabbing it first is fine.
+                this.stopMining(agent);
+                agent.moveTo(Goal.near(this.pos.getX() + 0.5, this.pos.getY() + 0.5, this.pos.getZ() + 0.5, 1.0));
+                this.next(Phase.COLLECT);
+            } else {
+                return Result.SUCCESS;
+            }
         }
 
         switch (this.phase) {
@@ -92,6 +108,12 @@ public final class BreakTask implements AgentTask {
                 BlockHitResult hit = Aiming.crosshair(player, agent.reach() + 0.5);
                 if (hit == null || !hit.getBlockPos().equals(this.pos)) {
                     this.stopMining(agent);
+                    // Aimed, but the crosshair lands elsewhere again and again (a drifting player, an edge): give up
+                    // after a few tries instead of flipping between aiming and mining until the task times out.
+                    if (++this.reaims > MAX_REAIMS) {
+                        this.failure = "crosshair_mismatch";
+                        return Result.FAILED;
+                    }
                     this.next(Phase.AIM);
                     return Result.RUNNING;
                 }
@@ -117,6 +139,13 @@ public final class BreakTask implements AgentTask {
                     this.stopMining(agent);
                     this.failure = "break_timeout";
                     return Result.FAILED;
+                }
+            }
+            case COLLECT -> {
+                MovementController.Status status = agent.tickMovement();
+                boolean approaching = status == MovementController.Status.MOVING;
+                if (approaching ? this.timer > COLLECT_TIMEOUT_TICKS : this.timer > COLLECT_SETTLE_TICKS) {
+                    return Result.SUCCESS;
                 }
             }
         }
@@ -157,10 +186,5 @@ public final class BreakTask implements AgentTask {
     @Override
     public String failureReason() {
         return this.failure;
-    }
-
-    @Override
-    public BlockPos focus() {
-        return this.pos;
     }
 }

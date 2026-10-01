@@ -78,7 +78,7 @@ public final class WorldNavAdapter implements NavWorld {
         }
 
         VoxelShape collision = state.getCollisionShape(this.world, this.mutable);
-        if (collision.isEmpty() || isOpenPassage(state)) {
+        if (collision.isEmpty() || isOpenablePassage(state) || isOpenPassage(state)) {
             flags |= PASSABLE;
         } else {
             double top = collision.getMax(net.minecraft.util.math.Direction.Axis.Y);
@@ -105,6 +105,12 @@ public final class WorldNavAdapter implements NavWorld {
             return state.get(Properties.OPEN);
         }
         return state.getBlock() instanceof FenceGateBlock && state.get(Properties.OPEN);
+    }
+
+    /** A path may include these passages: movement opens them before entering their collision box. */
+    public static boolean isOpenablePassage(BlockState state) {
+        return state.getBlock() instanceof DoorBlock door && door.getBlockSetType().canOpenByHand()
+                || state.getBlock() instanceof FenceGateBlock;
     }
 
     private static boolean isDangerous(BlockState state) {

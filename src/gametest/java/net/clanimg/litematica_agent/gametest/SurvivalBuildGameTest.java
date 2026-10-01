@@ -58,6 +58,8 @@ public class SurvivalBuildGameTest implements FabricClientGameTest {
             context.waitTicks(20);
 
             context.runOnClient(client -> AgentManager.get().startNew());
+
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             int sessionId = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
             context.waitFor(client -> {
@@ -92,6 +94,7 @@ public class SurvivalBuildGameTest implements FabricClientGameTest {
             // The test opened the chests itself without looking at them; only the agent's clicks count.
             GameTestSupport.resetRotationCheck();
             context.runOnClient(client -> AgentManager.get().begin(sessionId));
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(120);
             context.takeScreenshot("survival-04-building");
 

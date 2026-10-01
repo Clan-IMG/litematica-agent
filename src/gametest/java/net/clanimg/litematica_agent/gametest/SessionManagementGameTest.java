@@ -50,9 +50,11 @@ public class SessionManagementGameTest implements FabricClientGameTest {
 
             // Session 1: start, then pause in the middle like pressing ESC in the lock screen.
             context.runOnClient(client -> AgentManager.get().startNew());
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             int sessionA = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
             context.runOnClient(client -> AgentManager.get().begin(sessionA));
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(80);
             context.runOnClient(client -> client.currentScreen.close());
             context.waitTicks(5);
@@ -68,15 +70,18 @@ public class SessionManagementGameTest implements FabricClientGameTest {
             server.runCommand("fill 5 -60 15 8 -59 18 air");
             context.waitTicks(10);
             context.runOnClient(client -> AgentManager.get().startNew());
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             int sessionB = context.computeOnClient(client -> AgentManager.get().sessions().get(1).id);
             context.runOnClient(client -> AgentManager.get().begin(sessionB));
+            GameTestSupport.awaitLoading(context);
             expectCompleted(context, sessionB);
             GameTestSupport.assertBuilt(context, b, "session-b");
             assertState(context, sessionA, SessionState.PAUSED);
 
             // Back to session 1 with /agent start <id>.
             context.runOnClient(client -> AgentManager.get().resume(sessionA));
+            GameTestSupport.awaitLoading(context);
             expectCompleted(context, sessionA);
             GameTestSupport.assertBuilt(context, a, "session-a");
 
@@ -85,9 +90,11 @@ public class SessionManagementGameTest implements FabricClientGameTest {
             server.runCommand("fill 15 -60 5 19 -58 9 air");
             context.waitTicks(10);
             context.runOnClient(client -> AgentManager.get().startNew());
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             sessionC = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
             context.runOnClient(client -> AgentManager.get().begin(sessionC));
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(60);
         }
 
@@ -101,6 +108,7 @@ public class SessionManagementGameTest implements FabricClientGameTest {
             }
             context.takeScreenshot("session-02-rejoined");
             context.runOnClient(client -> AgentManager.get().resume(sessionC));
+            GameTestSupport.awaitLoading(context);
             expectCompleted(context, sessionC);
             SchematicPlacement c = context.computeOnClient(client -> fi.dy.masa.litematica.data.DataManager
                     .getSchematicPlacementManager().getSelectedSchematicPlacement());
@@ -111,6 +119,7 @@ public class SessionManagementGameTest implements FabricClientGameTest {
 
             // Cancelling needs a confirmation.
             context.runOnClient(client -> AgentManager.get().startNew());
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             int sessionD = context.computeOnClient(client -> AgentManager.get().sessions().isEmpty() ? -1
                     : AgentManager.get().sessions().get(0).id);

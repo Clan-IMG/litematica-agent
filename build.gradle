@@ -13,7 +13,11 @@ base {
 loom {
     runs {
         configureEach {
-            vmArgs "-Xmx4G"
+            // A real schematic of tens of millions of blocks needs more: ./gradlew runClientGameTest -PagentTestHeap=12G
+            vmArgs "-Xmx" + (providers.gradleProperty('agentTestHeap').orNull ?: '4G')
+            // The client game tests' network synchronizer sporadically aborts long agent runs ("interfacing with
+            // packets at a lower level"); the tests poll the world state themselves and do not need lockstep ticks.
+            property "fabric.client.gametest.disableNetworkSynchronizer", "true"
         }
     }
 }
@@ -98,6 +102,25 @@ java {
 
 test {
     useJUnitPlatform()
+}
+
+// Select one client scenario without editing the checked-in entrypoints, e.g.
+// ./gradlew runClientGameTest -PagentGameTest=WarehouseGameTest
+tasks.named('processGametestResources') {
+    inputs.property('agentGameTest', providers.gradleProperty('agentGameTest').orElse('all'))
+    doLast {
+        def selected = providers.gradleProperty('agentGameTest').orNull
+        if (selected != null) {
+            def manifest = file("${destinationDir}/fabric.mod.json")
+            def data = new groovy.json.JsonSlurper().parse(manifest)
+            def tests = data.entrypoints['fabric-client-gametest'].findAll {
+                it.tokenize('.').last() in selected.split(',').collect { name -> name.trim() }
+            }
+            if (tests.isEmpty()) throw new GradleException("Unknown agentGameTest: ${selected}")
+            data.entrypoints['fabric-client-gametest'] = tests
+            manifest.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(data))
+        }
+    }
 }
 
 jar {

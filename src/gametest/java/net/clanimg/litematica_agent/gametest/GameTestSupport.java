@@ -62,6 +62,11 @@ final class GameTestSupport {
         return false;
     }
 
+    /** Start, resume and stock read the schematic in the background; waits until that is done. */
+    static void awaitLoading(ClientGameTestContext context) {
+        context.waitFor(client -> !AgentManager.get().isLoading(), 20 * 120);
+    }
+
     /** Starts counting right-clicks with a view direction that does not fit (see {@link #ROTATION_MISMATCHES}). */
     static void resetRotationCheck() {
         ROTATION_MISMATCHES.set(0);

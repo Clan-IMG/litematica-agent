@@ -58,6 +58,8 @@ public class StockGameTest implements FabricClientGameTest {
             context.waitTicks(20);
 
             context.runOnClient(client -> AgentManager.get().startStocking());
+
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             if (!context.computeOnClient(client -> AgentManager.get().stockAgent() != null)) {
                 throw new AssertionError("Stocking did not start");

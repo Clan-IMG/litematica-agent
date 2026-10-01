@@ -14,6 +14,7 @@ import net.minecraft.client.gui.widget.CyclingButtonWidget;
 import net.minecraft.text.Text;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
 
@@ -48,6 +49,13 @@ public final class AgentSettingsScreen extends GameOptionsScreen implements Agen
         this.body.addWidgetEntry(
                 toggle("helper_blocks", config.useHelperBlocks, value -> config.useHelperBlocks = value),
                 toggle("look_tricks", config.allowLookTricks, value -> config.allowLookTricks = value));
+        this.body.addWidgetEntry(
+                toggle("air_placement", config.airPlacement, value -> config.airPlacement = value),
+                new ConfigSlider(0, 0, 150, AgentConfig.SUPPORT_CHAIN_UNLIMITED, 64,
+                        () -> config.maxSupportChain, value -> config.maxSupportChain = value,
+                        value -> value == AgentConfig.SUPPORT_CHAIN_UNLIMITED ? Chat.tr("settings.support_chain_unlimited")
+                                : Chat.tr("settings.support_chain", value),
+                        Chat.tr("settings.support_chain_tooltip")));
 
         this.body.addHeader(Chat.tr("settings.section_tools"));
         this.body.addWidgetEntry(
@@ -87,9 +95,8 @@ public final class AgentSettingsScreen extends GameOptionsScreen implements Agen
                         }));
         this.body.addWidgetEntry(
                 toggle("material_hud", config.showMaterialHud, value -> config.showMaterialHud = value),
-                toggle("agent_view", config.showAgentView, value -> config.showAgentView = value));
-        this.body.addWidgetEntry(
-                toggle("verbose_logging", config.verboseLogging, value -> config.verboseLogging = value), null);
+                toggle("path_particles", config.showPathParticles, value -> config.showPathParticles = value));
+        this.body.addAll(List.of(toggle("verbose_logging", config.verboseLogging, value -> config.verboseLogging = value)));
     }
 
     private static CyclingButtonWidget<Boolean> toggle(String key, boolean value, Consumer<Boolean> setter) {

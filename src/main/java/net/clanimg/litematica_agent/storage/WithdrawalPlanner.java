@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.ToIntFunction;
 
 /**
@@ -37,6 +38,16 @@ public final class WithdrawalPlanner {
      */
     public static Plan plan(StorageDatabase storage, String dimension, double px, double py, double pz,
                             LinkedHashMap<String, Integer> needs, int freeSlots, ToIntFunction<String> maxStackSize) {
+        return plan(storage, dimension, px, py, pz, needs, freeSlots, maxStackSize, Set.of());
+    }
+
+    /**
+     * @param exclude container keys (see {@link ContainerRecord#key()}) left out of the plan entirely, as if their
+     *                 contents did not exist - e.g. a chest a recent attempt could not physically reach
+     */
+    public static Plan plan(StorageDatabase storage, String dimension, double px, double py, double pz,
+                            LinkedHashMap<String, Integer> needs, int freeSlots, ToIntFunction<String> maxStackSize,
+                            Set<String> exclude) {
         Map<String, Integer> missing = new LinkedHashMap<>();
         Map<String, Integer> budget = new LinkedHashMap<>();
         int slotsLeft = freeSlots;
@@ -48,7 +59,7 @@ public final class WithdrawalPlanner {
             String item = need.getKey();
             int available = 0;
             for (ContainerRecord record : storage.containers()) {
-                if (record.dimension.equals(dimension)) {
+                if (record.dimension.equals(dimension) && !exclude.contains(record.key())) {
                     available += record.count(item);
                 }
             }
@@ -82,7 +93,7 @@ public final class WithdrawalPlanner {
             ContainerRecord best = null;
             double bestDistance = Double.MAX_VALUE;
             for (ContainerRecord record : storage.containers()) {
-                if (!record.dimension.equals(dimension) || perContainer.containsKey(record.key())) {
+                if (!record.dimension.equals(dimension) || perContainer.containsKey(record.key()) || exclude.contains(record.key())) {
                     continue;
                 }
                 boolean useful = false;

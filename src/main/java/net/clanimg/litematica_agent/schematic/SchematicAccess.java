@@ -10,10 +10,13 @@ import fi.dy.masa.litematica.selection.Box;
 import fi.dy.masa.litematica.util.PositionUtils;
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.enums.BedPart;
 import net.minecraft.block.enums.DoubleBlockHalf;
+import net.clanimg.litematica_agent.placement.WaterPlacement;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -30,6 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Bridge to Litematica. Litematica has no public API, so this class is the only place touching its internals.
@@ -83,22 +87,38 @@ public final class SchematicAccess {
     }
 
     /**
-     * Reads every non-air block of all enabled sub-regions and converts it to world coordinates, using the same
-     * transformation Litematica applies when pasting ({@code SchematicPlacingUtils.placeBlocksWithinChunk}).
+     * Reads the whole schematic at once, on the calling thread. Sessions read it in stages on background threads
+     * instead ({@link #readBlocks}, {@link #requirementsFor}, {@link #toResult}), which keeps the render thread free.
      */
     public static SchematicReadResult readTargets(SchematicPlacement placement) {
-        List<BuildTarget> targets = new ArrayList<>();
-        List<UnsupportedBlock> unsupported = new ArrayList<>();
-        Long2ObjectLinkedOpenHashMap<BlockState> blocks = new Long2ObjectLinkedOpenHashMap<>();
+        SchematicBlocks blocks = readBlocks(placement);
+        return toResult(blocks.states(), requirementsFor(blocks.distinct()));
+    }
+
+    /** Every non-air block of the schematic by packed world position, and the distinct states among them. */
+    public record SchematicBlocks(Long2ObjectLinkedOpenHashMap<BlockState> states, Set<BlockState> distinct) {
+    }
+
+    /**
+     * Reads every non-air block of all enabled sub-regions and converts it to world coordinates, using the same
+     * transformation Litematica applies when pasting ({@code SchematicPlacingUtils.placeBlocksWithinChunk}). Only reads
+     * the schematic's own data, so it may run on a background thread.
+     */
+    public static SchematicBlocks readBlocks(SchematicPlacement placement) {
         LitematicaSchematic schematic = placement.getSchematic();
+        // Sized once from the file's own block count, densely packed: a map that doubles itself two dozen times on
+        // the way to tens of millions of entries briefly needs twice its final size, which is what tips a 4 GB game
+        // over the edge; and the default fill leaves a third of the slots empty.
+        int expected = schematic == null ? 16 : Math.max(16, schematic.getMetadata().getTotalBlocks());
+        Long2ObjectLinkedOpenHashMap<BlockState> blocks = new Long2ObjectLinkedOpenHashMap<>(expected, 0.9f);
+        Set<BlockState> distinct = new ReferenceOpenHashSet<>();
         if (schematic == null) {
-            return new SchematicReadResult(targets, unsupported, blocks);
+            return new SchematicBlocks(blocks, distinct);
         }
 
         BlockPos origin = placement.getOrigin();
         BlockRotation mainRotation = placement.getRotation();
         BlockMirror mainMirror = placement.getMirror();
-        MaterialCache materials = MaterialCache.getInstance();
 
         for (Map.Entry<String, SubRegionPlacement> entry : placement.getEnabledRelativeSubRegionPlacements().entrySet()) {
             String regionName = entry.getKey();
@@ -149,11 +169,45 @@ public final class SchematicAccess {
                         }
 
                         blocks.put(worldPos.asLong(), state);
+                        distinct.add(state);
                     }
                 }
             }
         }
+        return new SchematicBlocks(blocks, distinct);
+    }
 
+    /**
+     * What a block state needs to be built: its item and count, or that it needs several items at once.
+     */
+    public record Requirement(ItemStack stack, boolean multipleItems) {
+    }
+
+    /**
+     * Looks up the item of every distinct block state. Uses Litematica's material cache, which is not made for other
+     * threads, so this runs on the render thread; there are only as many states as block types in the schematic.
+     */
+    public static Map<BlockState, Requirement> requirementsFor(Set<BlockState> states) {
+        MaterialCache materials = MaterialCache.getInstance();
+        Map<BlockState, Requirement> requirements = new Reference2ObjectOpenHashMap<>();
+        for (BlockState state : states) {
+            if (materials.requiresMultipleItems(state)) {
+                requirements.put(state, new Requirement(ItemStack.EMPTY, true));
+                continue;
+            }
+            // A dirt path is made from dirt with a shovel; the dirt path item itself cannot be obtained in survival.
+            ItemStack stack = state.isOf(Blocks.DIRT_PATH) ? new ItemStack(Items.DIRT) : materials.getRequiredBuildItemForState(state);
+            requirements.put(state, new Requirement(stack.copy(), false));
+        }
+        return requirements;
+    }
+
+    /**
+     * Turns the blocks into build targets, leaving out what cannot be built. May run on a background thread.
+     */
+    public static SchematicReadResult toResult(Long2ObjectLinkedOpenHashMap<BlockState> blocks, Map<BlockState, Requirement> requirements) {
+        List<BuildTarget> targets = new ArrayList<>(blocks.size());
+        List<UnsupportedBlock> unsupported = new ArrayList<>();
         for (Long2ObjectMap.Entry<BlockState> entry : blocks.long2ObjectEntrySet()) {
             BlockPos pos = BlockPos.fromLong(entry.getLongKey());
             BlockState state = entry.getValue();
@@ -161,7 +215,7 @@ public final class SchematicAccess {
                 unsupported.add(new UnsupportedBlock(pos, state, UnsupportedBlock.Reason.HALF_PAIR));
                 continue;
             }
-            addTarget(pos, state, materials, targets, unsupported);
+            addTarget(pos, state, requirements.get(state), targets, unsupported);
         }
         return new SchematicReadResult(targets, unsupported, blocks);
     }
@@ -186,14 +240,29 @@ public final class SchematicAccess {
         return false;
     }
 
-    private static void addTarget(BlockPos pos, BlockState state, MaterialCache materials,
+    private static void addTarget(BlockPos pos, BlockState state, @Nullable Requirement requirement,
                                   List<BuildTarget> targets, List<UnsupportedBlock> unsupported) {
-        if (materials.requiresMultipleItems(state)) {
+        if (WaterPlacement.isWaterTarget(state)) {
+            // Poured with a bucket; the buckets are refilled on site, see WaterPlacement.
+            targets.add(new BuildTarget(pos, state, Items.WATER_BUCKET, 1));
+            return;
+        }
+        if (state.isOf(Blocks.WATER)) {
+            // Flowing water follows from the sources next to it by itself.
+            return;
+        }
+        if (state.isOf(Blocks.LIGHT) || state.isOf(Blocks.BARRIER) || state.isOf(Blocks.BEDROCK)
+                || state.isOf(Blocks.COMMAND_BLOCK) || state.isOf(Blocks.CHAIN_COMMAND_BLOCK)
+                || state.isOf(Blocks.REPEATING_COMMAND_BLOCK) || state.isOf(Blocks.STRUCTURE_BLOCK)
+                || state.isOf(Blocks.JIGSAW) || state.isOf(Blocks.END_PORTAL_FRAME) || state.isOf(Blocks.SPAWNER)) {
+            unsupported.add(new UnsupportedBlock(pos, state, UnsupportedBlock.Reason.SURVIVAL_UNOBTAINABLE));
+            return;
+        }
+        if (requirement != null && requirement.multipleItems()) {
             unsupported.add(new UnsupportedBlock(pos, state, UnsupportedBlock.Reason.MULTIPLE_ITEMS));
             return;
         }
-        // A dirt path is made from dirt with a shovel; the dirt path item itself cannot be obtained in survival.
-        ItemStack stack = state.isOf(Blocks.DIRT_PATH) ? new ItemStack(Items.DIRT) : materials.getRequiredBuildItemForState(state);
+        ItemStack stack = requirement == null ? ItemStack.EMPTY : requirement.stack();
         if (stack.isEmpty()) {
             // Upper door halves, bed heads, piston heads, ... are created together with their counterpart.
             if (!state.getFluidState().isEmpty() && state.getFluidState().isStill()) {
@@ -225,7 +294,10 @@ public final class SchematicAccess {
             NOT_A_BLOCK_ITEM,
             HALF_PAIR,
             NO_SUPPORT,
-            BECOMES_DIRT
+            MISSING_WATER,
+            SURVIVAL_UNOBTAINABLE,
+            BECOMES_DIRT,
+            OUTSIDE_WORLD
         }
     }
 }

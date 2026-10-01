@@ -16,6 +16,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.font.DrawnTextConsumer;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
@@ -53,6 +54,9 @@ public final class ChestScanOverlay {
     public static final int COLOR_OTHER = 0xFF9CA3AF;
     private static final long CLICK_MEMORY_MILLIS = 5_000L;
     private static final long REVEAL_STEP_MILLIS = 35L;
+    /** Small square buttons (icon only, vanilla hover highlight), like the icon buttons other inventory mods use. */
+    private static final int BUTTON_SIZE = 20;
+    private static final int BUTTON_GAP = 2;
 
     private static @Nullable BlockPos lastClickedBlock;
     private static long lastClickTime;
@@ -152,10 +156,15 @@ public final class ChestScanOverlay {
         /** Contents of a known container when it was opened, by slot index, to notice what the player put in. */
         private final Map<Integer, ItemStack> contentsAtOpen = new HashMap<>();
         private final List<ClickableWidget> ownButtons = new ArrayList<>();
+        /** Character icon drawn centred on each button, in the same order as {@link #ownButtons}. */
+        private final List<String> buttonIcons = new ArrayList<>();
         private @Nullable ButtonWidget scanAll;
         private @Nullable ButtonWidget select;
         private @Nullable ButtonWidget confirm;
         private @Nullable ButtonWidget cancel;
+        /** Non-null when the container was already scanned before this opening; used to colour slots immediately even
+         *  if their contents arrive from the server after the screen was initialised. */
+        private @Nullable ContainerRecord knownRecord;
         private boolean selecting;
         private long revealStart;
         private Text status = Text.empty();
@@ -170,19 +179,17 @@ public final class ChestScanOverlay {
         }
 
         void install() {
-            int x = this.accessor.litematicaAgent$getX() + this.accessor.litematicaAgent$getBackgroundWidth() + 4;
+            int x = Math.min(this.accessor.litematicaAgent$getX() + this.accessor.litematicaAgent$getBackgroundWidth() + 2,
+                    this.screen.width - BUTTON_SIZE - 2);
             int y = this.accessor.litematicaAgent$getY() + 4;
-            int buttonWidth = Math.max(60, Math.min(110, this.screen.width - x - 4));
+            int step = BUTTON_SIZE + BUTTON_GAP;
 
-            this.scanAll = ButtonWidget.builder(Chat.tr("scan.all"), button -> this.scanAll())
-                    .dimensions(x, y, buttonWidth, 20).tooltip(Tooltip.of(Chat.tr("scan.all_tooltip"))).build();
-            this.select = ButtonWidget.builder(Chat.tr("scan.select"), button -> this.startSelection())
-                    .dimensions(x, y + 22, buttonWidth, 20).tooltip(Tooltip.of(Chat.tr("scan.select_tooltip"))).build();
-            this.confirm = ButtonWidget.builder(Chat.tr("scan.confirm"), button -> this.confirmSelection())
-                    .dimensions(x, y, buttonWidth, 20).build();
-            this.cancel = ButtonWidget.builder(Chat.tr("scan.cancel"), button -> this.stopSelection())
-                    .dimensions(x, y + 22, buttonWidth, 20).build();
-            this.ownButtons.addAll(List.of(this.scanAll, this.select, this.confirm, this.cancel));
+            this.scanAll = this.iconButton(x, y, "◉", "scan.all",
+                    Chat.tr("scan.all"), button -> this.scanAll());
+            this.select = this.iconButton(x, y + step, "✦", "scan.select",
+                    Chat.tr("scan.select"), button -> this.startSelection());
+            this.confirm = this.iconButton(x, y, "✓", "scan.confirm", Chat.tr("scan.confirm"), button -> this.confirmSelection());
+            this.cancel = this.iconButton(x, y + step, "✕", "scan.cancel", Chat.tr("scan.cancel"), button -> this.stopSelection());
             Screens.getButtons(this.screen).addAll(this.ownButtons);
 
             if (this.pos == null) {
@@ -193,8 +200,9 @@ public final class ChestScanOverlay {
             } else {
                 ContainerRecord existing = this.existingRecord();
                 if (existing != null) {
+                    // Remember the record so that colours are drawn even if slot contents arrive after init.
+                    this.knownRecord = existing;
                     this.reveal(this.recordedSlots(existing), false);
-                    this.setStatus(Chat.tr("scan.known"), 0xFF9CA3AF);
                     for (Slot slot : this.handler.slots) {
                         if (this.isContainerSlot(slot)) {
                             this.contentsAtOpen.put(slot.getIndex(), slot.getStack().copy());
@@ -207,6 +215,8 @@ public final class ChestScanOverlay {
             // Drawn right after the container background, so the markings lie under the items, the hover highlight
             // and the tooltip instead of on top of them.
             ScreenEvents.afterBackground(this.screen).register((s, context, mouseX, mouseY, delta) -> this.render(context, mouseX, mouseY));
+            // The button icons are drawn on top of the vanilla button background, once that has rendered.
+            ScreenEvents.afterRender(this.screen).register((s, context, mouseX, mouseY, delta) -> this.renderIcons(context));
             ScreenMouseEvents.allowMouseClick(this.screen).register((s, click) -> this.allowClick(click));
             ScreenKeyboardEvents.allowKeyPress(this.screen).register((s, input) -> !this.selecting || input.isEscape());
             ScreenEvents.remove(this.screen).register(s -> {
@@ -298,7 +308,59 @@ public final class ChestScanOverlay {
             this.select.visible = !this.selecting;
             this.confirm.visible = this.selecting;
             this.cancel.visible = this.selecting;
-            this.confirm.setMessage(Chat.tr("scan.confirm_count", this.selected.size()));
+            this.confirm.setTooltip(Tooltip.of(Chat.tr("scan.confirm_count", this.selected.size())));
+        }
+
+        /**
+         * A small square button with a single-character icon (drawn separately in {@link #renderIcons}) instead of a
+         * visible text label. The button keeps its real translatable message - just not drawn - so a screen reader
+         * still announces it and game tests can still find it by that name, exactly like a normal labelled button.
+         */
+        private ButtonWidget iconButton(int x, int y, String icon, String messageKey, Text tooltip, ButtonWidget.PressAction action) {
+            ButtonWidget button = new IconButton(x, y, BUTTON_SIZE, Chat.tr(messageKey), action);
+            button.setTooltip(Tooltip.of(tooltip));
+            this.ownButtons.add(button);
+            this.buttonIcons.add(icon);
+            return button;
+        }
+
+        /** Vanilla button with its label rendering suppressed; see {@link #iconButton}. */
+        private static final class IconButton extends ButtonWidget {
+            // Fully qualified: ButtonWidget's own hierarchy declares a nested type also called Text, which would
+            // otherwise shadow the net.minecraft.text.Text import inside this subclass.
+            IconButton(int x, int y, int size, net.minecraft.text.Text message, PressAction onPress) {
+                super(x, y, size, size, message, onPress, DEFAULT_NARRATION_SUPPLIER);
+            }
+
+            @Override
+            protected void drawIcon(DrawContext context, int x, int y, float deltaTicks) {
+                // The pixel icon is drawn afterwards in Controller#renderIcons, once the whole screen has rendered.
+            }
+
+            @Override
+            protected void drawLabel(DrawnTextConsumer consumer) {
+                // No text label: the icon alone says what the button does.
+            }
+        }
+
+        private void renderIcons(DrawContext context) {
+            for (int i = 0; i < this.ownButtons.size(); i++) {
+                ClickableWidget button = this.ownButtons.get(i);
+                if (!button.visible) {
+                    continue;
+                }
+                String icon = this.buttonIcons.get(i);
+                int iconX = button.getX() + (button.getWidth() - this.client.textRenderer.getWidth(icon)) / 2;
+                int iconY = button.getY() + (button.getHeight() - 8) / 2;
+                context.drawTextWithShadow(this.client.textRenderer, icon, iconX, iconY,
+                        button.active ? 0xFFE5E7EB : 0xFF6B7280);
+            }
+            if (this.confirm.visible && !this.selected.isEmpty()) {
+                String count = String.valueOf(this.selected.size());
+                int badgeX = this.confirm.getX() + this.confirm.getWidth() - this.client.textRenderer.getWidth(count) - 2;
+                int badgeY = this.confirm.getY() + this.confirm.getHeight() - 9;
+                context.drawTextWithShadow(this.client.textRenderer, count, badgeX, badgeY, 0xFFFFFFFF);
+            }
         }
 
         private void setStatus(Text text, int color) {
@@ -373,7 +435,11 @@ public final class ChestScanOverlay {
                 }
                 Integer order = this.revealIndex.get(slot.id);
                 if (order == null || elapsed < order * REVEAL_STEP_MILLIS) {
-                    continue;
+                    // Fallback: if this container was already known, colour the slot from the record directly.
+                    // This handles the case where slot contents arrive from the server after install().
+                    if (this.knownRecord == null || !this.knownRecord.allows(slot.getIndex())) {
+                        continue;
+                    }
                 }
                 int color = colorFor(slot.getStack());
                 context.fill(x, y, x + 16, y + 16, (color & 0x00FFFFFF) | 0x50000000);
@@ -387,24 +453,15 @@ public final class ChestScanOverlay {
                 }
             }
 
-            int textX = this.scanAll.getX();
-            int textY = this.scanAll.getY() + 48;
-            int maxWidth = Math.max(40, this.screen.width - textX - 4);
             if (!this.status.getString().isEmpty()) {
+                int textX = this.scanAll.getX();
+                int textY = this.scanAll.getY() + 2 * BUTTON_SIZE + BUTTON_GAP + 6;
+                int maxWidth = Math.max(40, this.screen.width - textX - 4);
                 for (var line : this.client.textRenderer.wrapLines(this.status, maxWidth)) {
                     context.drawTextWithShadow(this.client.textRenderer, line, textX, textY, this.statusColor);
                     textY += 10;
                 }
-                textY += 4;
             }
-            this.legend(context, textX, textY, COLOR_MATERIAL, Chat.tr("scan.legend_material"));
-            this.legend(context, textX, textY + 11, COLOR_TOOL, Chat.tr("scan.legend_tool"));
-            this.legend(context, textX, textY + 22, COLOR_FOOD, Chat.tr("scan.legend_food"));
-        }
-
-        private void legend(DrawContext context, int x, int y, int color, Text label) {
-            context.fill(x, y + 1, x + 7, y + 8, color);
-            context.drawTextWithShadow(this.client.textRenderer, label, x + 10, y, 0xFFE5E7EB);
         }
     }
 }

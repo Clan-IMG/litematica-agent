@@ -49,12 +49,19 @@ public final class PlacementSolver {
      * @param pitch      camera pitch needed
      * @param lookTrick  the camera looks in a different direction than the clicked point (see {@link #setAllowLookTricks})
      */
-    public record Option(BlockHitResult hit, Vec3d aimPoint, boolean sneak, float yaw, float pitch, boolean lookTrick) {
+    /**
+     * @param lookTrick the camera looks elsewhere than the clicked face, see {@link #setAllowLookTricks}
+     * @param air       the click goes to the target's own, still empty cell instead of a neighbour's face, see
+     *                  {@link #setAllowAirPlacement}
+     */
+    public record Option(BlockHitResult hit, Vec3d aimPoint, boolean sneak, float yaw, float pitch, boolean lookTrick,
+                         boolean air) {
     }
 
     private static final float[] TRICK_PITCHES = {-90.0F, 0.0F, 90.0F};
 
     private boolean allowLookTricks = true;
+    private boolean allowAirPlacement;
     /** Look-trick results per clicked face, valid for one target. The view direction does not depend on the eye. */
     private final Map<String, Optional<float[]>> trickCache = new HashMap<>();
     private @Nullable BuildTarget trickCacheTarget;
@@ -65,6 +72,16 @@ public final class PlacementSolver {
      */
     public void setAllowLookTricks(boolean allow) {
         this.allowLookTricks = allow;
+    }
+
+    /**
+     * Clicks into the target's own, still empty cell when nothing next to it can be clicked - the way Litematica's
+     * "easy place" puts blocks against the schematic preview. Vanilla servers accept a click on an empty cell within
+     * reach; the view direction is genuine (the crosshair really rests on that cell), but anti-cheats that check the
+     * clicked block itself may flag it. Only used when no ordinary click exists.
+     */
+    public void setAllowAirPlacement(boolean allow) {
+        this.allowAirPlacement = allow;
     }
 
     public record StandSpot(BlockPos feet, Option option) {
@@ -102,7 +119,82 @@ public final class PlacementSolver {
                 }
             }
         }
+        return this.allowAirPlacement && this.airFeasible(player, blockItem, stack, target);
+    }
+
+    /** {@link #isFeasible} for a click into the target's own cell, see {@link #setAllowAirPlacement}. */
+    private boolean airFeasible(ClientPlayerEntity player, BlockItem blockItem, ItemStack stack, BuildTarget target) {
+        World world = player.getEntityWorld();
+        if (!world.getBlockState(target.pos()).isReplaceable()) {
+            return false;
+        }
+        int yawSteps = target.state().contains(Properties.ROTATION) ? 16 : 4;
+        for (Direction face : Direction.values()) {
+            BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(target.pos()).add(Vec3d.of(face.getVector()).multiply(0.5)),
+                    face, target.pos(), false);
+            for (int yawStep = 0; yawStep < yawSteps; yawStep++) {
+                float yaw = yawStep * (360.0F / yawSteps);
+                for (float pitch : FEASIBILITY_PITCHES) {
+                    for (boolean sneak : new boolean[]{false, true}) {
+                        BlockState result = this.simulate(player, blockItem, stack, hit, yaw, pitch, sneak, target.pos());
+                        if (result != null && fits(world, result, target)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
         return false;
+    }
+
+    /**
+     * A click into the target's own cell from the given eye, see {@link #setAllowAirPlacement}: a point on one of the
+     * cell's faces turned towards the eye, within reach and with nothing real in the way.
+     */
+    private @Nullable Option findAirPlacement(ClientPlayerEntity player, BlockItem blockItem, ItemStack stack,
+                                              BuildTarget target, Vec3d eye, double reach) {
+        World world = player.getEntityWorld();
+        BlockPos pos = target.pos();
+        if (!world.getBlockState(pos).isReplaceable()) {
+            return null;
+        }
+        List<AimPoint> points = new ArrayList<>();
+        for (Direction face : Direction.values()) {
+            // The face has to look at the eye: a click on a face turned away would lie inside the cell.
+            Vec3d normal = Vec3d.of(face.getVector());
+            if (eye.subtract(Vec3d.ofCenter(pos)).dotProduct(normal) <= 0.5) {
+                continue;
+            }
+            addFacePoints(points, pos, face, new Box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0));
+        }
+        Option fallback = null;
+        for (AimPoint aim : points) {
+            double distance = eye.distanceTo(aim.point());
+            if (distance > reach || distance < 0.3) {
+                continue;
+            }
+            BlockHitResult real = world.raycast(new RaycastContext(eye, aim.point(), RaycastContext.ShapeType.OUTLINE,
+                    RaycastContext.FluidHandling.NONE, player));
+            if (real.getType() == HitResult.Type.BLOCK) {
+                continue;
+            }
+            BlockHitResult hit = new BlockHitResult(aim.point(), aim.face(), pos, false);
+            float[] angles = RotationController.anglesTo(eye, aim.point());
+            for (boolean sneak : new boolean[]{false, true}) {
+                BlockState result = this.simulate(player, blockItem, stack, hit, angles[0], angles[1], sneak, pos);
+                if (result == null || !fits(world, result, target)) {
+                    continue;
+                }
+                Option option = new Option(hit, aim.point(), sneak, angles[0], angles[1], false, true);
+                if (!sneak) {
+                    return option;
+                }
+                if (fallback == null) {
+                    fallback = option;
+                }
+            }
+        }
+        return fallback;
     }
 
     /**
@@ -166,7 +258,7 @@ public final class PlacementSolver {
                 if (result == null || !fits(world, result, target)) {
                     continue;
                 }
-                Option option = new Option(hit, aim.point(), sneak, angles[0], angles[1], false);
+                Option option = new Option(hit, aim.point(), sneak, angles[0], angles[1], false, false);
                 if (!sneak) {
                     return option;
                 }
@@ -183,6 +275,13 @@ public final class PlacementSolver {
         }
         if (fallback != null) {
             return fallback;
+        }
+        if (this.allowAirPlacement) {
+            // Before a look trick: the view direction of an air click is genuine.
+            Option air = this.findAirPlacement(player, blockItem, stack, target, eye, reach);
+            if (air != null) {
+                return air;
+            }
         }
         return trickCandidates == null || trickCandidates.isEmpty() ? null : trickCandidates.get(0);
     }
@@ -211,7 +310,7 @@ public final class PlacementSolver {
                 + Math.round(hitPos.x * 4) + ":" + Math.round(hitPos.y * 4) + ":" + Math.round(hitPos.z * 4);
         Optional<float[]> cached = this.trickCache.computeIfAbsent(key, ignored -> Optional.ofNullable(
                 this.searchLookTrick(player, item, stack, target, hit, mustSneak)));
-        return cached.map(found -> new Option(hit, aimPoint, found[2] > 0.5F, found[0], found[1], true)).orElse(null);
+        return cached.map(found -> new Option(hit, aimPoint, found[2] > 0.5F, found[0], found[1], true, false)).orElse(null);
     }
 
     private float @Nullable [] searchLookTrick(ClientPlayerEntity player, BlockItem item, ItemStack stack, BuildTarget target,

@@ -16,6 +16,8 @@ import net.clanimg.litematica_agent.config.AgentConfig;
 import net.clanimg.litematica_agent.gui.AgentSettingsScreen;
 import net.clanimg.litematica_agent.gui.BlockQueueScreen;
 import net.clanimg.litematica_agent.persistence.WorldData;
+import net.clanimg.litematica_agent.storage.ContainerRecord;
+import net.clanimg.litematica_agent.storage.StorageHomes;
 import net.clanimg.litematica_agent.ui.Chat;
 import net.clanimg.litematica_agent.ui.Messages;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
@@ -127,6 +129,7 @@ public final class AgentCommands {
                 .then(literal("clear").executes(context -> {
                     WorldData data = manager.worldData();
                     data.storageHomeCommand = "";
+                    data.storageHomes.clear();
                     data.buildHomeCommand = "";
                     manager.save();
                     Chat.info(Chat.tr("home.cleared"));
@@ -145,6 +148,9 @@ public final class AgentCommands {
                         .executes(context -> setWrongBlockMode(StringArgumentType.getString(context, "mode")))))
                 .then(boolOption("useHelperBlocks", (config, value) -> config.useHelperBlocks = value))
                 .then(boolOption("allowLookTricks", (config, value) -> config.allowLookTricks = value))
+                .then(boolOption("airPlacement", (config, value) -> config.airPlacement = value))
+                .then(intOption("maxSupportChain", AgentConfig.SUPPORT_CHAIN_UNLIMITED, AgentConfig.MAX_SUPPORT_CHAIN_LIMIT,
+                        (config, value) -> config.maxSupportChain = value))
                 .then(intOption("toolDurabilityReserve", 1, 200, (config, value) -> config.toolDurabilityReserve = value))
                 .then(intOption("eatAtFoodLevel", 1, 19, (config, value) -> config.eatAtFoodLevel = value))
                 .then(floatOption("pauseAtHealth", 1.0F, 20.0F, (config, value) -> config.pauseAtHealth = value))
@@ -310,7 +316,20 @@ public final class AgentCommands {
         }
         WorldData data = AgentManager.get().worldData();
         if (storage) {
-            data.storageHomeCommand = cleaned;
+            MinecraftClient client = MinecraftClient.getInstance();
+            ContainerRecord nearest = null;
+            double closest = 48.0 * 48.0;
+            if (client.player != null && client.world != null) {
+                String dimension = client.world.getRegistryKey().getValue().toString();
+                for (ContainerRecord container : AgentManager.get().storage().containers()) {
+                    double distance = container.distanceSq(client.player.getX(), client.player.getY(), client.player.getZ());
+                    if (container.dimension.equals(dimension) && distance <= closest) {
+                        nearest = container;
+                        closest = distance;
+                    }
+                }
+            }
+            StorageHomes.configure(data, nearest, cleaned);
         } else {
             data.buildHomeCommand = cleaned;
         }
@@ -330,6 +349,8 @@ public final class AgentCommands {
         line.accept("wrongBlocks", config.wrongBlockMode.id());
         line.accept("useHelperBlocks", config.useHelperBlocks);
         line.accept("allowLookTricks", config.allowLookTricks);
+        line.accept("airPlacement", config.airPlacement);
+        line.accept("maxSupportChain", config.maxSupportChain);
         line.accept("toolDurabilityReserve", config.toolDurabilityReserve);
         line.accept("eatAtFoodLevel", config.eatAtFoodLevel);
         line.accept("pauseAtHealth", config.pauseAtHealth);

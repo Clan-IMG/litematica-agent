@@ -3,8 +3,10 @@ package net.clanimg.litematica_agent.config;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Global settings, stored in {@code config/litematica_agent/config.json}.
@@ -12,11 +14,13 @@ import java.util.Locale;
 public final class AgentConfig {
     /** What happens with blocks at schematic positions that the agent did not place itself. */
     public enum WrongBlockMode {
-        /** Pause and let the player approve or reject breaking the block. */
+        /**
+         * Pause on any problem (wrong block, missing tool/material, no support, ...) and let the player leave freely
+         * to fix it in the world. The agent quietly retries every few seconds and takes control back automatically
+         * once it can continue; a wrong block also offers an explicit approve (break it) or skip button.
+         */
         ASK,
-        /** Break it without asking. */
-        ALLOW,
-        /** Leave it in place and skip the schematic block at that position. */
+        /** Never pause for a single block: skip whatever cannot be built right now and keep going. */
         SKIP;
 
         public String id() {
@@ -47,6 +51,9 @@ public final class AgentConfig {
     public static final int SLOWEST_SPEED = 40;
     public static final int MIN_AGENT_FPS = 20;
     public static final int MAX_AGENT_FPS = 120;
+    /** {@link #maxSupportChain} value that means "no limit" (build all the way down to solid ground). */
+    public static final int SUPPORT_CHAIN_UNLIMITED = 0;
+    public static final int MAX_SUPPORT_CHAIN_LIMIT = 200;
 
     /** Language of all texts: {@code config/litematica_agent/message_<language>.yml}. */
     public String language = "en";
@@ -67,14 +74,34 @@ public final class AgentConfig {
     public WrongBlockMode wrongBlockMode = WrongBlockMode.ASK;
     /** Use cheap blocks to pillar up and to support floating blocks; they are removed afterwards. */
     public boolean useHelperBlocks = true;
+    /**
+     * Longest scaffold of helper blocks the agent builds to reach solid ground for a floating target, e.g. relevant
+     * for {@link net.clanimg.litematica_agent.agent.BuildStrategy#LAYERS_TOP_DOWN}, where upper layers often have
+     * nothing to build against yet. {@link #SUPPORT_CHAIN_UNLIMITED} (0) builds all the way down to solid ground.
+     * Every helper block is placed and removed the same clean way as any other helper (real block, matching
+     * rotation) - only the search reach changes.
+     */
+    public int maxSupportChain = 6;
     public List<String> helperBlocks = new ArrayList<>(List.of(
             "minecraft:dirt", "minecraft:cobblestone", "minecraft:cobbled_deepslate", "minecraft:netherrack",
-            "minecraft:stone", "minecraft:andesite", "minecraft:diorite", "minecraft:granite"));
+            "minecraft:stone", "minecraft:andesite", "minecraft:diorite", "minecraft:granite",
+            "minecraft:gravel", "minecraft:sand", "minecraft:red_sand", "minecraft:sandstone",
+            "minecraft:deepslate", "minecraft:tuff", "minecraft:blackstone"));
+    /** The very first default list of {@link #helperBlocks}, to recognise a config that was never customised. */
+    private static final Set<String> ORIGINAL_HELPER_BLOCKS = Set.of(
+            "minecraft:dirt", "minecraft:cobblestone", "minecraft:cobbled_deepslate", "minecraft:netherrack",
+            "minecraft:stone", "minecraft:andesite", "minecraft:diorite", "minecraft:granite");
     /**
      * Allow orientations that need a view direction different from the clicked face (e.g. observers facing up on the
      * floor). Vanilla accepts this; strict anti-cheat plugins might not.
      */
     public boolean allowLookTricks = true;
+    /**
+     * Click into a block's own empty cell when nothing next to it can be clicked, like Litematica's "easy place":
+     * vanilla servers accept it, so floating parts and layers with nothing under them get built without scaffolds.
+     * The view direction stays genuine; anti-cheats that check the clicked block may still flag it.
+     */
+    public boolean airPlacement = true;
     /** Stop using a tool when this many uses are left. */
     public int toolDurabilityReserve = 10;
     /** Start eating at or below this food level (6 = sprinting no longer possible). */
@@ -89,8 +116,8 @@ public final class AgentConfig {
     /** Maximum distance to the schematic when starting a session. */
     public int maxStartDistance = 64;
     public boolean showMaterialHud = true;
-    /** A small grey 3D picture top left of how the agent sees the world, to understand its decisions. */
-    public boolean showAgentView = true;
+    /** Glow particles along the agent's current path, so it is visible in the world where it is walking to. */
+    public boolean showPathParticles = true;
     /** Log every failed step with its reason (useful for bug reports). */
     public boolean verboseLogging = false;
 
@@ -104,8 +131,13 @@ public final class AgentConfig {
         this.eatAtFoodLevel = clamp(this.eatAtFoodLevel, 1, 19);
         this.homeDistance = clamp(this.homeDistance, 16, 100_000);
         this.maxStartDistance = clamp(this.maxStartDistance, 8, 1024);
+        this.maxSupportChain = clamp(this.maxSupportChain, SUPPORT_CHAIN_UNLIMITED, MAX_SUPPORT_CHAIN_LIMIT);
         if (this.helperBlocks == null) {
             this.helperBlocks = new ArrayList<>();
+        } else if (new HashSet<>(this.helperBlocks).equals(ORIGINAL_HELPER_BLOCKS)) {
+            // Still exactly the old default: a saved config keeps whatever the player edited, but an untouched one
+            // picks up newly recognised cheap blocks the same way a fresh install would.
+            this.helperBlocks = new ArrayList<>(new AgentConfig().helperBlocks);
         }
         if (this.wrongBlockMode == null) {
             this.wrongBlockMode = WrongBlockMode.ASK;

@@ -22,7 +22,10 @@ public class CreativeBuildGameTest implements FabricClientGameTest {
     public void runTest(ClientGameTestContext context) {
         GameTestSupport.logMemory("before " + getClass().getSimpleName());
         GameTestSupport.resetRotationCheck();
-        context.runOnClient(client -> AgentManager.get().config().speed = AgentConfig.FASTEST_SPEED);
+        context.runOnClient(client -> {
+            AgentManager.get().config().speed = AgentConfig.FASTEST_SPEED;
+            AgentManager.get().config().verboseLogging = true;
+        });
         try {
             this.buildAndCheck(context);
         } finally {
@@ -46,9 +49,12 @@ public class CreativeBuildGameTest implements FabricClientGameTest {
             context.takeScreenshot("creative-01-placement");
 
             context.runOnClient(client -> AgentManager.get().startNew());
+
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(5);
             int sessionId = context.computeOnClient(client -> AgentManager.get().sessions().get(0).id);
             context.runOnClient(client -> AgentManager.get().begin(sessionId));
+            GameTestSupport.awaitLoading(context);
             context.waitTicks(200);
             context.takeScreenshot("creative-02-building");
 

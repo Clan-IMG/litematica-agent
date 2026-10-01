@@ -63,8 +63,17 @@ class StateMatcherTest {
     @Test
     void neighbourDrivenPropertiesAreIgnored() {
         BlockState target = Blocks.OAK_FENCE.getDefaultState().with(Properties.NORTH, true);
-        BlockState world = Blocks.OAK_FENCE.getDefaultState().with(Properties.NORTH, false).with(Properties.WATERLOGGED, true);
+        BlockState world = Blocks.OAK_FENCE.getDefaultState().with(Properties.NORTH, false);
         assertTrue(StateMatcher.isComplete(world, target));
+    }
+
+    @Test
+    void missingOrExtraWaterIsNotACompletedSchematicBlock() {
+        BlockState dry = Blocks.STONE_SLAB.getDefaultState();
+        BlockState wet = dry.with(Properties.WATERLOGGED, true);
+        assertFalse(StateMatcher.isComplete(dry, wet));
+        assertFalse(StateMatcher.isComplete(wet, dry));
+        assertTrue(StateMatcher.isComplete(wet, wet));
     }
 
     @Test

@@ -8,6 +8,7 @@ import net.minecraft.block.CampfireBlock;
 import net.minecraft.block.DaylightDetectorBlock;
 import net.minecraft.block.DoorBlock;
 import net.minecraft.block.FenceGateBlock;
+import net.minecraft.block.FluidBlock;
 import net.minecraft.block.LeverBlock;
 import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.enums.ChestType;
@@ -68,7 +69,13 @@ public final class StateMatcher {
      * Whether the world state fully equals the schematic state (ignoring neighbour-driven properties).
      */
     public static boolean isComplete(BlockState world, BlockState target) {
-        return placementMatches(world, target, false) && countsEqual(world, target) && interactionsMatch(world, target);
+        if (target.getBlock() instanceof FluidBlock) {
+            // A water or lava source is only done as a source; flowing water on its way there is not.
+            return world.getBlock() == target.getBlock() && world.getFluidState().isStill() == target.getFluidState().isStill();
+        }
+        return placementMatches(world, target, false) && countsEqual(world, target) && interactionsMatch(world, target)
+                && (!target.contains(Properties.WATERLOGGED) || (world.contains(Properties.WATERLOGGED)
+                && world.get(Properties.WATERLOGGED).equals(target.get(Properties.WATERLOGGED))));
     }
 
     /**

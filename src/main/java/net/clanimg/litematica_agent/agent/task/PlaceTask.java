@@ -33,6 +33,14 @@ public final class PlaceTask implements AgentTask {
 
     private static final int AIM_TIMEOUT = 30;
     private static final int VERIFY_TIMEOUT = 12;
+    /** Walking to a stand position close to the block never takes this long; beyond it the way is blocked. */
+    private static final int MOVE_TIMEOUT = 20 * 25;
+    /**
+     * Ticks the client's own placement has to hold before it counts as done. The client applies a placement locally
+     * right away, before the server has actually confirmed it; a rejection (a protected region, an anti-cheat...) is
+     * usually reverted within a tick or two, so waiting this long catches it instead of reporting success too early.
+     */
+    private static final int CONFIRM_TICKS = 3;
     private static final int MAX_REAIMS = 3;
     private static final int SETTLE_TICKS = 8;
     /** Upper bound for phases passed through in one tick; a retry loop can never spin. */
@@ -41,6 +49,7 @@ public final class PlaceTask implements AgentTask {
     private static final double EYE_MOVED_SQ = 0.02 * 0.02;
 
     private final int index;
+    private final int supportTargetIndex;
     private final BuildTarget target;
     private final @Nullable BlockPos spot;
     /** Whether a look trick may be used; only when no click without one was found. */
@@ -53,11 +62,17 @@ public final class PlaceTask implements AgentTask {
     /** Where the eye was when {@link #option} was planned. */
     private @Nullable Vec3d optionEye;
     private @Nullable BlockState before;
+    private int confirmTicks;
     private String failure = "";
     private boolean missingItem;
 
     public PlaceTask(int index, BuildTarget target, @Nullable BlockPos spot, boolean allowTrick) {
+        this(index, target, spot, allowTrick, -1);
+    }
+
+    public PlaceTask(int index, BuildTarget target, @Nullable BlockPos spot, boolean allowTrick, int supportTargetIndex) {
         this.index = index;
+        this.supportTargetIndex = supportTargetIndex;
         this.target = target;
         this.spot = spot;
         this.allowTrick = allowTrick;
@@ -66,6 +81,14 @@ public final class PlaceTask implements AgentTask {
 
     public int index() {
         return this.index;
+    }
+
+    public int supportTargetIndex() {
+        return this.supportTargetIndex;
+    }
+
+    public BlockPos position() {
+        return this.target.pos();
     }
 
     public boolean isMissingItem() {
@@ -105,8 +128,9 @@ public final class PlaceTask implements AgentTask {
                 return this.fail("path_not_found");
             }
         }
-        // Stop as soon as the block can be placed from where the player is, not only at the planned spot.
-        if (agent.isStable() && !agent.isPlayerInTheWay(this.target)
+        // Stop as soon as the block can be placed from where the player is, not only at the planned spot - unless a
+        // click from right here already failed: then the planned spot is the whole point of the walk.
+        if (agent.isStable() && !agent.isPlayerInTheWay(this.target) && !agent.failedFromHere(this.index, player.getBlockPos())
                 && agent.solver().findFromPlayer(player, this.target, agent.reach(), this.allowTrick) != null) {
             agent.movement().stop();
             return this.next(Phase.PREPARE);
@@ -120,6 +144,10 @@ public final class PlaceTask implements AgentTask {
         }
         if (status == MovementController.Status.IDLE) {
             return this.fail("path_interrupted");
+        }
+        if (this.timer > MOVE_TIMEOUT) {
+            agent.movement().stop();
+            return this.fail("path_stuck");
         }
         return Result.RUNNING;
     }
@@ -223,22 +251,26 @@ public final class PlaceTask implements AgentTask {
      * instead; the result is still verified with the real rotation.
      */
     private @Nullable BlockHitResult validHit(BuildAgent agent, ClientPlayerEntity player) {
-        BlockHitResult hit = this.option.lookTrick() ? this.option.hit() : Aiming.crosshair(player, agent.reach() + 0.5);
+        BlockHitResult hit = this.option.lookTrick() ? this.option.hit()
+                : this.option.air() ? Aiming.airHit(player, agent.world(), this.target.pos(), agent.reach() + 0.5)
+                : Aiming.crosshair(player, agent.reach() + 0.5);
         return hit != null && (this.option.lookTrick() || Aiming.isClearOfEdges(hit))
                 && agent.solver().check(player, this.target, hit, this.option.sneak()) ? hit : null;
     }
 
     /**
-     * The client places the block itself right away and the server confirms it; a rejected placement is reverted by
-     * the server and noticed by the agent's continuous rescan.
+     * The client places the block itself right away, before the server confirms it. Success is only reported once
+     * that has held for {@link #CONFIRM_TICKS}, so a block the server rejects and reverts is not shown as done in the
+     * short window before the revert arrives; the continuous rescan still catches a later, slower revert.
      */
     private Result tickVerify(BuildAgent agent) {
         agent.setHeldSneak(this.option != null && this.option.sneak() && this.timer < 3);
         BlockState state = agent.world().getBlockState(this.target.pos());
-        if (state != this.before && state.isOf(this.target.state().getBlock())) {
-            return Result.SUCCESS;
+        if (state != this.before && StateMatcher.isValidPlacement(state, this.target.state())) {
+            return ++this.confirmTicks >= CONFIRM_TICKS ? Result.SUCCESS : Result.RUNNING;
         }
-        if (this.timer > VERIFY_TIMEOUT) {
+        // Reverted back after already having changed once: something rejected it, retry instead of waiting out the timeout.
+        if (this.confirmTicks > 0 || this.timer > VERIFY_TIMEOUT) {
             return this.fail("placement_not_confirmed");
         }
         return Result.RUNNING;
@@ -277,11 +309,6 @@ public final class PlaceTask implements AgentTask {
     @Override
     public String failureReason() {
         return this.failure;
-    }
-
-    @Override
-    public BlockPos focus() {
-        return this.target.pos();
     }
 
     static Text posText(BlockPos pos) {

@@ -100,9 +100,6 @@ public final class StockAgent {
 
         /** Starts the step from the beginning, e.g. when the job is resumed after a pause. */
         void reset();
-
-        /** The chest the step works on, shown in the agent view. */
-        BlockPos focus();
     }
 
     private final AgentManager manager;
@@ -353,15 +350,6 @@ public final class StockAgent {
         return this.rotation;
     }
 
-    public MovementController movement() {
-        return this.movement;
-    }
-
-    /** The chest the current step works on, or null. */
-    public @Nullable BlockPos focus() {
-        return this.current == null ? null : this.current.focus();
-    }
-
     // ---------------------------------------------------------------- shared helpers
 
     private double reach(ClientPlayerEntity player) {
@@ -469,11 +457,6 @@ public final class StockAgent {
             this.pos = pos;
             this.target = new BuildTarget(pos, state, Items.CHEST, 1);
             this.joinsPartner = joinsPartner;
-        }
-
-        @Override
-        public BlockPos focus() {
-            return this.pos;
         }
 
         @Override
@@ -704,11 +687,6 @@ public final class StockAgent {
             this.level = level;
             this.openPos = level.posA();
             this.toGive = new LinkedHashMap<>(level.contents());
-        }
-
-        @Override
-        public BlockPos focus() {
-            return this.openPos;
         }
 
         /** Stacks left in the inventory from before a pause are still recognised by {@link #ownSlots}. */

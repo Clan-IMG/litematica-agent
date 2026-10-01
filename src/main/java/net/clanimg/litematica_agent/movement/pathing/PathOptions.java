@@ -34,6 +34,10 @@ public record PathOptions(
         return new PathOptions(this.canFly, this.maxFall, count, this.maxNodes, this.noFlyColumn, this.forbidden, this.noPillar);
     }
 
+    public PathOptions withMaxFall(int blocks) {
+        return new PathOptions(this.canFly, blocks, this.helperBlocks, this.maxNodes, this.noFlyColumn, this.forbidden, this.noPillar);
+    }
+
     public PathOptions withNoFly(LongPredicate predicate) {
         return new PathOptions(this.canFly, this.maxFall, this.helperBlocks, this.maxNodes, predicate, this.forbidden, this.noPillar);
     }
